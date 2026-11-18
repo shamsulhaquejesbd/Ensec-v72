@@ -7,17 +7,21 @@
  * integration across field_force_reps, employee_attendances, and overtime_requests.
  */
 
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import {
   X,
   Printer,
+  Download,
   RefreshCw,
   Calendar,
   UserCheck,
   AlertCircle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas-pro';
 import { useERP } from '../../context/ERPContext.tsx';
 import { getSupabase } from '../../lib/supabase.ts';
 import { calculateNetWorkingHours, formatTime12Hour, parseTimeToMinutes } from '../../lib/geofence.ts';
@@ -29,6 +33,7 @@ interface EmployeeAttendanceCardModalProps {
   isOpen: boolean;
   initialEmployeeId?: string;
   initialMonthYear?: string; // YYYY-MM
+  autoDownloadPdf?: boolean;
   onClose: () => void;
 }
 
@@ -81,6 +86,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
   isOpen,
   initialEmployeeId,
   initialMonthYear,
+  autoDownloadPdf = false,
   onClose,
 }) => {
   const {
@@ -92,6 +98,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     systemSettings,
   } = useERP();
 
+  const cardPrintRef = useRef<HTMLDivElement | null>(null);
   const defaultMonthYear = initialMonthYear || new Date().toISOString().slice(0, 7);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>(
     initialEmployeeId || fieldForceReps[0]?.id || ''
@@ -100,6 +107,13 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('portrait');
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<boolean>(false);
+  const [pdfFeedback, setPdfFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [fetchedKey, setFetchedKey] = useState<string>('');
+  const [autoDownloadPending, setAutoDownloadPending] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dbEmployee, setDbEmployee] = useState<FieldForceRep | null>(null);
   const [dbAttendances, setDbAttendances] = useState<AttendanceRecord[]>([]);
@@ -108,7 +122,12 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
 
   // Sync initial props whenever modal opens
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setAutoDownloadPending(false);
+      setPdfFeedback(null);
+      setFetchedKey('');
+      return;
+    }
     if (initialEmployeeId) {
       setSelectedEmployeeId(initialEmployeeId);
     } else if (!selectedEmployeeId && fieldForceReps.length > 0) {
@@ -117,7 +136,11 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     if (initialMonthYear) {
       setSelectedMonthYear(initialMonthYear);
     }
-  }, [isOpen, initialEmployeeId, initialMonthYear]);
+    setPdfFeedback(null);
+    if (autoDownloadPdf) {
+      setAutoDownloadPending(true);
+    }
+  }, [isOpen, initialEmployeeId, initialMonthYear, autoDownloadPdf]);
 
   const contextEmployee = useMemo(
     () =>
@@ -154,6 +177,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
       setDbOvertimeRequests([]);
       setDbOvertimeAttendances([]);
       setLoadError(null);
+      setFetchedKey(`${contextEmployee.id}::${monthStart}`);
       return;
     }
 
@@ -369,6 +393,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
       setLoadError(err?.message || 'Unable to load monthly attendance card data from Supabase.');
     } finally {
       setIsLoading(false);
+      setFetchedKey(`${contextEmployee.id}::${monthStart}`);
     }
   }, [isOpen, contextEmployee, monthStart, monthEnd]);
 
@@ -672,6 +697,110 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     setTimeout(cleanup, 2000);
   };
 
+  const handleDownloadPdf = useCallback(async () => {
+    const cardEl = cardPrintRef.current;
+    if (!cardEl || !activeEmployee || isGeneratingPdf) return;
+
+    setIsGeneratingPdf(true);
+    setPdfFeedback(null);
+
+    try {
+      if (document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+
+      const targetWidth = orientation === 'landscape' ? 1060 : 820;
+      const canvas = await html2canvas(cardEl, {
+        scale: 2.5,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#f5dc78',
+        logging: false,
+        windowWidth: 1280,
+        windowHeight: 1600,
+        onclone: (_clonedDoc, clonedEl) => {
+          clonedEl.style.width = `${targetWidth}px`;
+          clonedEl.style.maxWidth = `${targetWidth}px`;
+          clonedEl.style.margin = '0';
+          clonedEl.style.boxShadow = 'none';
+          clonedEl.querySelectorAll('[data-pdf-exclude="true"]').forEach((node) => node.remove());
+        },
+      });
+
+      const pdf = new jsPDF({
+        orientation,
+        unit: 'mm',
+        format: 'a4',
+        compress: true,
+      });
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 7;
+      const maxW = pageWidth - margin * 2;
+      const maxH = pageHeight - margin * 2;
+      const aspect = canvas.width / canvas.height;
+
+      let renderW = maxW;
+      let renderH = renderW / aspect;
+      if (renderH > maxH) {
+        renderH = maxH;
+        renderW = renderH * aspect;
+      }
+
+      const offsetX = (pageWidth - renderW) / 2;
+      const offsetY = margin;
+      const imgData = canvas.toDataURL('image/png', 1.0);
+      pdf.addImage(imgData, 'PNG', offsetX, offsetY, renderW, renderH, undefined, 'FAST');
+
+      const safeCode = String(activeEmployee.code || activeEmployee.id || 'EMP')
+        .trim()
+        .replace(/[^a-zA-Z0-9_-]+/g, '_');
+      const safeName = String(activeEmployee.name || 'Employee')
+        .trim()
+        .replace(/[^a-zA-Z0-9_-]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+      const fileName = `Attendance_Card_${safeCode}${safeName ? `_${safeName}` : ''}_${selectedMonthYear}.pdf`;
+
+      pdf.save(fileName);
+      setPdfFeedback({
+        type: 'success',
+        message: `Downloaded ${fileName}`,
+      });
+    } catch (err: any) {
+      setPdfFeedback({
+        type: 'error',
+        message: err?.message || 'Failed to generate Attendance Card PDF. Please try again.',
+      });
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  }, [activeEmployee, isGeneratingPdf, orientation, selectedMonthYear]);
+
+  useEffect(() => {
+    if (!isOpen || !autoDownloadPending || isLoading || !contextEmployee || !activeEmployee) {
+      return;
+    }
+    const currentKey = `${contextEmployee.id}::${monthStart}`;
+    if (fetchedKey !== currentKey) return;
+
+    const timer = window.setTimeout(() => {
+      setAutoDownloadPending(false);
+      void handleDownloadPdf();
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    isOpen,
+    autoDownloadPending,
+    isLoading,
+    contextEmployee,
+    activeEmployee,
+    monthStart,
+    fetchedKey,
+    handleDownloadPdf,
+  ]);
+
   if (!isOpen) return null;
 
   const rawCompanyName = payrollSettings?.companyName?.trim();
@@ -803,8 +932,18 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
 
             <button
               type="button"
+              onClick={handleDownloadPdf}
+              disabled={!activeEmployee || isLoading || isGeneratingPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs transition-colors"
+            >
+              <Download className={`w-3.5 h-3.5 ${isGeneratingPdf ? 'animate-bounce' : ''}`} />
+              <span>{isGeneratingPdf ? 'Generating PDF...' : 'Download PDF'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handlePrintCard}
-              disabled={!activeEmployee}
+              disabled={!activeEmployee || isGeneratingPdf}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
             >
               <Printer className="w-3.5 h-3.5" />
@@ -824,6 +963,33 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
 
         {/* Body Preview Area */}
         <div className="flex-1 overflow-y-auto p-3 sm:p-5 bg-slate-100 dark:bg-slate-950/80 print:p-0 print:bg-white print:overflow-visible">
+          {pdfFeedback && (
+            <div
+              className={`mb-3 p-3 rounded-xl border text-xs flex items-center justify-between gap-2 print:hidden ${
+                pdfFeedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {pdfFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                )}
+                <span className="font-semibold">{pdfFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPdfFeedback(null)}
+                className="p-0.5 rounded hover:bg-black/5"
+                aria-label="Dismiss notification"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {loadError && (
             <div className="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2 print:hidden">
               <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
@@ -837,6 +1003,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
             </div>
           ) : (
             <div
+              ref={cardPrintRef}
               id="employee-attendance-card-print"
               lang="bn"
               className={`mx-auto bg-[#f5dc78] text-black border border-slate-400 shadow-md p-5 sm:p-7 print:bg-white print:border-black print:shadow-none print:p-2 ${
@@ -845,7 +1012,10 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
             >
               {/* Loading indicator overlay bar on screen */}
               {isLoading && (
-                <div className="mb-2 px-3 py-1 rounded bg-white/80 border border-slate-400 text-slate-800 text-[11px] font-semibold flex items-center gap-2 print:hidden">
+                <div
+                  data-pdf-exclude="true"
+                  className="mb-2 px-3 py-1 rounded bg-white/80 border border-slate-400 text-slate-800 text-[11px] font-semibold flex items-center gap-2 print:hidden"
+                >
                   <RefreshCw className="w-3 h-3 animate-spin" />
                   <span>Loading {monthLabel} attendance &amp; overtime data...</span>
                 </div>
