@@ -203,26 +203,46 @@ input[type="number"] {
     print-color-adjust: exact;
   }
 
-  body.printing-qr-badges * {
-    visibility: hidden;
+  body.printing-qr-badges {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
-  body.printing-qr-badges #qr-badges-a4-print,
-  body.printing-qr-badges #qr-badges-a4-print * {
-    visibility: visible;
+  body.printing-qr-badges > *:not(#qr-badges-a4-print-portal) {
+    display: none !important;
   }
-  body.printing-qr-badges #qr-badges-a4-print {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
+  body.printing-qr-badges #qr-badges-a4-print-portal {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
     margin: 0 !important;
     padding: 0 !important;
     overflow: visible !important;
     box-shadow: none !important;
     background: #ffffff !important;
+    color: #0f172a !important;
     page: qr-badges-a4;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+  }
+  body.printing-qr-badges #qr-badges-a4-print-portal * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body.printing-qr-badges .qr-a4-sheet {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    break-after: page;
+    page-break-after: always;
+  }
+  body.printing-qr-badges .qr-a4-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
   }
 }
 

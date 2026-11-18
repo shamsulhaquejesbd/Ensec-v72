@@ -6,6 +6,7 @@ import {
   CameraOff,
   CheckCircle2,
   Clock,
+  ImageUp,
   LogIn,
   LogOut,
   QrCode,
@@ -95,6 +96,7 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inFlightRef = useRef<boolean>(false);
   const localCooldownRef = useRef<Map<string, number>>(new Map());
   const feedbackTimerRef = useRef<number | null>(null);
@@ -175,6 +177,7 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
       try {
         const res = await submitQrAttendanceScan(payload);
         if (res.success && res.employee) {
+          localCooldownRef.current.set(payload, Date.now());
           const item: QrScanFeedbackItem = {
             id: `qrlog-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
             employeeName: res.employee.name,
@@ -214,6 +217,8 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
             statusMessage: res.error || 'Recently scanned — cooldown active (3s).',
           });
         } else {
+          // Allow quicker retry after an unrecognized/failed decode attempt
+          localCooldownRef.current.set(payload, Date.now() - 1500);
           showTransientBanner({
             type: 'error',
             employeeName: res.employee?.name,
@@ -229,6 +234,77 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
       }
     },
     [submitQrAttendanceScan, showTransientBanner, soundEnabled, onScanRecorded]
+  );
+
+  const handleScanImageFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (!file) return;
+
+      const objectUrl = URL.createObjectURL(file);
+      try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error('Failed to load selected image.'));
+          el.src = objectUrl;
+        });
+
+        const maxDim = 1200;
+        const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) throw new Error('Canvas context unavailable.');
+        ctx.drawImage(img, 0, 0, w, h);
+
+        let decodedText = '';
+        const NativeBarcodeDetector = (window as any).BarcodeDetector;
+        if (NativeBarcodeDetector) {
+          try {
+            const det = new NativeBarcodeDetector({ formats: ['qr_code'] });
+            const found = await det.detect(canvas);
+            if (Array.isArray(found) && found[0]?.rawValue) {
+              decodedText = String(found[0].rawValue);
+            }
+          } catch {
+            // Fall through to jsQR
+          }
+        }
+
+        if (!decodedText) {
+          const imgData = ctx.getImageData(0, 0, w, h);
+          const qr = jsQR(imgData.data, imgData.width, imgData.height, {
+            inversionAttempts: 'attemptBoth',
+          });
+          if (qr?.data) {
+            decodedText = qr.data;
+          }
+        }
+
+        if (decodedText) {
+          await processDecodedQr(decodedText);
+        } else {
+          showTransientBanner({
+            type: 'error',
+            statusMessage: 'No QR code detected in the selected image.',
+          });
+          if (soundEnabled) playFeedbackTone('error');
+        }
+      } catch (err: any) {
+        showTransientBanner({
+          type: 'error',
+          statusMessage: err?.message || 'Unable to scan QR code from image.',
+        });
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    },
+    [processDecodedQr, showTransientBanner, soundEnabled]
   );
 
   const startCamera = useCallback(async () => {
@@ -303,6 +379,7 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
 
     let cancelled = false;
     let lastDecodeMs = 0;
+    let tickCount = 0;
     const NativeBarcodeDetector = (window as any).BarcodeDetector;
     let detector: any = null;
     if (NativeBarcodeDetector) {
@@ -313,6 +390,29 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
       }
     }
 
+    const decodeFrameWithJsQr = (video: HTMLVideoElement): string | null => {
+      let canvas = canvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvasRef.current = canvas;
+      }
+      const targetW = Math.min(720, video.videoWidth);
+      const scale = targetW / video.videoWidth;
+      const targetH = Math.max(1, Math.round(video.videoHeight * scale));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, targetW, targetH);
+      const imgData = ctx.getImageData(0, 0, targetW, targetH);
+      const decoded = jsQR(imgData.data, imgData.width, imgData.height, {
+        inversionAttempts: 'attemptBoth',
+      });
+      return decoded?.data || null;
+    };
+
     const tick = async () => {
       if (cancelled) return;
       const now = performance.now();
@@ -320,39 +420,32 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
 
       if (video && video.readyState >= 2 && video.videoWidth > 0 && now - lastDecodeMs >= 110) {
         lastDecodeMs = now;
-        try {
-          if (detector) {
+        tickCount += 1;
+        let detectedPayload: string | null = null;
+
+        if (detector) {
+          try {
             const barcodes = await detector.detect(video);
             if (Array.isArray(barcodes) && barcodes.length > 0 && barcodes[0]?.rawValue) {
-              void processDecodedQr(String(barcodes[0].rawValue));
+              detectedPayload = String(barcodes[0].rawValue);
             }
-          } else {
-            let canvas = canvasRef.current;
-            if (!canvas) {
-              canvas = document.createElement('canvas');
-              canvasRef.current = canvas;
-            }
-            const targetW = Math.min(720, video.videoWidth);
-            const scale = targetW / video.videoWidth;
-            const targetH = Math.max(1, Math.round(video.videoHeight * scale));
-            if (canvas.width !== targetW || canvas.height !== targetH) {
-              canvas.width = targetW;
-              canvas.height = targetH;
-            }
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            if (ctx) {
-              ctx.drawImage(video, 0, 0, targetW, targetH);
-              const imgData = ctx.getImageData(0, 0, targetW, targetH);
-              const decoded = jsQR(imgData.data, imgData.width, imgData.height, {
-                inversionAttempts: 'attemptBoth',
-              });
-              if (decoded?.data) {
-                void processDecodedQr(decoded.data);
-              }
-            }
+          } catch {
+            // Switch cleanly to jsQR if native BarcodeDetector fails on this browser/driver
+            detector = null;
           }
-        } catch {
-          // Continue scanning frames
+        }
+
+        // Run jsQR when BarcodeDetector is unavailable OR every 3rd cycle as a dual-engine safety net
+        if (!detectedPayload && (!detector || tickCount % 3 === 0)) {
+          try {
+            detectedPayload = decodeFrameWithJsQr(video);
+          } catch {
+            // Continue scanning frames
+          }
+        }
+
+        if (detectedPayload) {
+          void processDecodedQr(detectedPayload);
         }
       }
 
@@ -598,30 +691,49 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
                 </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  if (cameraStatus === 'active') {
-                    stopCameraStream();
-                    setCameraStatus('paused');
-                  } else {
-                    void startCamera();
-                  }
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              >
-                {cameraStatus === 'active' ? (
-                  <>
-                    <CameraOff className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Pause Camera</span>
-                  </>
-                ) : (
-                  <>
-                    <Camera className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Start Camera</span>
-                  </>
-                )}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleScanImageFile}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  title="Scan a downloaded Employee QR badge image"
+                >
+                  <ImageUp className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Scan QR Image</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (cameraStatus === 'active') {
+                      stopCameraStream();
+                      setCameraStatus('paused');
+                    } else {
+                      void startCamera();
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                >
+                  {cameraStatus === 'active' ? (
+                    <>
+                      <CameraOff className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Pause Camera</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Start Camera</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 

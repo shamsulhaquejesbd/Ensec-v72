@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   CheckCircle2,
   Download,
@@ -76,17 +77,30 @@ export const EmployeeQrSingleModal: React.FC<SingleQrModalProps> = ({
     };
   }, [isOpen, employee, getErpAuthHeaders]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleBeforePrint = () => {
+      document.body.classList.add('printing-qr-badges');
+    };
+    const handleAfterPrint = () => {
+      document.body.classList.remove('printing-qr-badges');
+    };
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+      document.body.classList.remove('printing-qr-badges');
+    };
+  }, [isOpen]);
+
   if (!isOpen || !employee) return null;
 
   const handlePrintSingle = () => {
     document.body.classList.add('printing-qr-badges');
-    const cleanup = () => {
-      document.body.classList.remove('printing-qr-badges');
-      window.removeEventListener('afterprint', cleanup);
-    };
-    window.addEventListener('afterprint', cleanup);
-    window.print();
-    setTimeout(cleanup, 2000);
+    requestAnimationFrame(() => {
+      window.print();
+    });
   };
 
   const handleDownload = async () => {
@@ -99,113 +113,125 @@ export const EmployeeQrSingleModal: React.FC<SingleQrModalProps> = ({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto print:static print:p-0 print:bg-white">
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden print:border-none print:shadow-none print:max-w-none print:rounded-none">
-        {/* Modal Header (Hidden on Print) */}
-        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between print:hidden">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-2xs">
-              <QrCode className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Employee Attendance QR Code
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                Permanent encrypted identifier linked to {employee.code || employee.id}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+  const singleBadgeCard = (
+    <div className="w-full max-w-[330px] mx-auto bg-white rounded-2xl border-2 border-slate-200 shadow-sm overflow-hidden text-center print:shadow-none print:border-slate-300">
+      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 px-4 py-3 text-white">
+        <div className="text-[10px] font-bold uppercase tracking-widest text-blue-200">
+          {companyName}
         </div>
+        <div className="text-xs font-extrabold tracking-wide mt-0.5">
+          ATTENDANCE ID CARD
+        </div>
+      </div>
 
-        {/* Printable ID Badge Area */}
-        <div className="p-6 flex flex-col items-center bg-slate-50 dark:bg-slate-950/40 print:bg-white print:p-8">
-          <div
-            id="qr-badges-a4-print"
-            className="w-full max-w-[330px] mx-auto bg-white rounded-2xl border-2 border-slate-200 shadow-sm overflow-hidden text-center"
-          >
-            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 px-4 py-3 text-white">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-blue-200">
-                {companyName}
-              </div>
-              <div className="text-xs font-extrabold tracking-wide mt-0.5">
-                ATTENDANCE ID CARD
-              </div>
-            </div>
-
-            <div className="p-5 space-y-3">
-              <div>
-                <h4 className="text-base font-black text-slate-900 leading-tight">
-                  {employee.name}
-                </h4>
-                <p className="text-xs font-semibold text-slate-500 mt-0.5">
-                  {employee.designation || 'Staff'}
-                </p>
-                <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 font-mono font-bold text-xs">
-                  <span>ID: {employee.code || employee.id}</span>
-                </div>
-              </div>
-
-              <div className="mx-auto w-52 h-52 rounded-2xl border border-slate-200 bg-white p-2.5 flex items-center justify-center">
-                {isLoading ? (
-                  <div className="flex flex-col items-center gap-2 text-slate-400">
-                    <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
-                    <span className="text-[11px] font-medium">Generating secure QR...</span>
-                  </div>
-                ) : error ? (
-                  <div className="text-xs text-rose-600 font-semibold px-2">{error}</div>
-                ) : qrImageUrl ? (
-                  <img
-                    src={qrImageUrl}
-                    alt={`QR Code for ${employee.name}`}
-                    className="w-full h-full object-contain"
-                  />
-                ) : null}
-              </div>
-
-              <div className="pt-1 border-t border-slate-100 flex items-center justify-center gap-1.5 text-[10px] font-semibold text-slate-500">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span>Permanent Signed QR • Auto IN / OUT Attendance</span>
-              </div>
-            </div>
+      <div className="p-5 space-y-3">
+        <div>
+          <h4 className="text-base font-black text-slate-900 leading-tight">
+            {employee.name}
+          </h4>
+          <p className="text-xs font-semibold text-slate-500 mt-0.5">
+            {employee.designation || 'Staff'}
+          </p>
+          <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 font-mono font-bold text-xs">
+            <span>ID: {employee.code || employee.id}</span>
           </div>
         </div>
 
-        {/* Footer Actions (Hidden on Print) */}
-        <div className="px-5 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between gap-2 print:hidden">
-          <button
-            type="button"
-            disabled={!qrToken || isDownloading}
-            onClick={handleDownload}
-            className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors shadow-2xs"
-          >
-            {isDownloading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Download className="w-3.5 h-3.5" />
-            )}
-            <span>Download PNG</span>
-          </button>
-          <button
-            type="button"
-            disabled={!qrImageUrl}
-            onClick={handlePrintSingle}
-            className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-bold transition-colors"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Print QR</span>
-          </button>
+        <div className="mx-auto w-52 h-52 rounded-2xl border border-slate-200 bg-white p-2.5 flex items-center justify-center">
+          {isLoading ? (
+            <div className="flex flex-col items-center gap-2 text-slate-400">
+              <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
+              <span className="text-[11px] font-medium">Generating secure QR...</span>
+            </div>
+          ) : error ? (
+            <div className="text-xs text-rose-600 font-semibold px-2">{error}</div>
+          ) : qrImageUrl ? (
+            <img
+              src={qrImageUrl}
+              alt={`QR Code for ${employee.name}`}
+              className="w-full h-full object-contain"
+            />
+          ) : null}
+        </div>
+
+        <div className="pt-1 border-t border-slate-100 flex items-center justify-center gap-1.5 text-[10px] font-semibold text-slate-500">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+          <span>Permanent Signed QR • Auto IN / OUT Attendance</span>
         </div>
       </div>
     </div>
+  );
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto print:hidden">
+        <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+          {/* Modal Header */}
+          <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-2xs">
+                <QrCode className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Employee Attendance QR Code
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Permanent encrypted identifier linked to {employee.code || employee.id}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Printable ID Badge Preview Area */}
+          <div className="p-6 flex flex-col items-center bg-slate-50 dark:bg-slate-950/40">
+            {singleBadgeCard}
+          </div>
+
+          {/* Footer Actions */}
+          <div className="px-5 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              disabled={!qrToken || isDownloading}
+              onClick={handleDownload}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors shadow-2xs"
+            >
+              {isDownloading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Download className="w-3.5 h-3.5" />
+              )}
+              <span>Download PNG</span>
+            </button>
+            <button
+              type="button"
+              disabled={!qrImageUrl}
+              onClick={handlePrintSingle}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-bold transition-colors"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print QR</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {typeof document !== 'undefined' &&
+        qrImageUrl &&
+        createPortal(
+          <div id="qr-badges-a4-print-portal" className="hidden print:block">
+            <div className="qr-a4-sheet py-6 flex justify-center">{singleBadgeCard}</div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 };
 
@@ -306,6 +332,31 @@ export const EmployeeQrBulkModal: React.FC<BulkQrModalProps> = ({ isOpen, onClos
     return filteredEmployees.filter((emp) => selectedIds.has(emp.id));
   }, [filteredEmployees, selectedIds]);
 
+  const badgePages = useMemo(() => {
+    const pages: FieldForceRep[][] = [];
+    for (let i = 0; i < printableEmployees.length; i += 8) {
+      pages.push(printableEmployees.slice(i, i + 8));
+    }
+    return pages;
+  }, [printableEmployees]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleBeforePrint = () => {
+      document.body.classList.add('printing-qr-badges');
+    };
+    const handleAfterPrint = () => {
+      document.body.classList.remove('printing-qr-badges');
+    };
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+      document.body.classList.remove('printing-qr-badges');
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const toggleSelect = (id: string) => {
@@ -328,13 +379,9 @@ export const EmployeeQrBulkModal: React.FC<BulkQrModalProps> = ({ isOpen, onClos
   const handleBulkPrintA4 = () => {
     if (printableEmployees.length === 0) return;
     document.body.classList.add('printing-qr-badges');
-    const cleanup = () => {
-      document.body.classList.remove('printing-qr-badges');
-      window.removeEventListener('afterprint', cleanup);
-    };
-    window.addEventListener('afterprint', cleanup);
-    window.print();
-    setTimeout(cleanup, 2500);
+    requestAnimationFrame(() => {
+      window.print();
+    });
   };
 
   const handleBulkZipDownload = async () => {
@@ -354,9 +401,49 @@ export const EmployeeQrBulkModal: React.FC<BulkQrModalProps> = ({ isOpen, onClos
     }
   };
 
+  const renderBadgeCard = (emp: FieldForceRep, isPrintSheet = false) => (
+    <div
+      key={`${isPrintSheet ? 'print' : 'preview'}-badge-${emp.id}`}
+      className={`border-2 border-slate-200 rounded-xl bg-white flex items-center gap-3.5 break-inside-avoid ${
+        isPrintSheet ? 'p-2.5' : 'p-3'
+      }`}
+    >
+      <div
+        className={`${
+          isPrintSheet ? 'w-24 h-24' : 'w-28 h-28'
+        } shrink-0 rounded-xl border border-slate-200 bg-white p-1.5 flex items-center justify-center`}
+      >
+        {qrImagesById[emp.id] ? (
+          <img
+            src={qrImagesById[emp.id]}
+            alt={`QR ${emp.code}`}
+            className="w-full h-full object-contain"
+          />
+        ) : (
+          <Loader2 className="w-5 h-5 animate-spin text-slate-400" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1 text-left">
+        <div className="text-[9px] font-bold uppercase tracking-wider text-blue-700 truncate">
+          {companyName} • ATTENDANCE ID
+        </div>
+        <div className="text-sm font-black text-slate-900 truncate mt-0.5">
+          {emp.name}
+        </div>
+        <div className="inline-block mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 font-mono text-xs font-bold text-blue-700">
+          {emp.code || emp.id}
+        </div>
+        <div className="text-[11px] text-slate-600 font-medium truncate mt-1">
+          {emp.designation || 'Staff'}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto print:static print:p-0 print:bg-white print:overflow-visible">
-      <div className="w-full max-w-6xl max-h-[94vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden print:max-h-none print:border-none print:shadow-none print:rounded-none print:overflow-visible">
+    <>
+      <div className="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto print:hidden">
+        <div className="w-full max-w-6xl max-h-[94vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
         {/* Top Modal Action Bar (Hidden on Print) */}
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 flex flex-col lg:flex-row lg:items-center justify-between gap-3 print:hidden">
           <div className="flex items-center gap-3">
@@ -506,56 +593,51 @@ export const EmployeeQrBulkModal: React.FC<BulkQrModalProps> = ({ isOpen, onClos
                 })}
               </div>
 
-              {/* A4 Printable Grid */}
-              <div
-                id="qr-badges-a4-print"
-                className="mx-auto max-w-[210mm] bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-200 print:max-w-none print:shadow-none print:border-none print:p-0 print:rounded-none"
-              >
-                {printableEmployees.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-slate-400">
-                    Select one or more employees above to preview A4 QR badges or download ZIP.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-3.5 print:gap-3">
-                    {printableEmployees.map((emp) => (
-                      <div
-                        key={`badge-${emp.id}`}
-                        className="border-2 border-slate-200 rounded-xl p-3 bg-white flex items-center gap-3.5 break-inside-avoid print:break-inside-avoid"
-                      >
-                        <div className="w-28 h-28 shrink-0 rounded-xl border border-slate-200 bg-white p-1.5 flex items-center justify-center">
-                          {qrImagesById[emp.id] ? (
-                            <img
-                              src={qrImagesById[emp.id]}
-                              alt={`QR ${emp.code}`}
-                              className="w-full h-full object-contain"
-                            />
-                          ) : (
-                            <Loader2 className="w-5 h-5 animate-spin text-slate-400" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1 text-left">
-                          <div className="text-[9px] font-bold uppercase tracking-wider text-blue-700 truncate">
-                            {companyName} • ATTENDANCE ID
-                          </div>
-                          <div className="text-sm font-black text-slate-900 truncate mt-0.5">
-                            {emp.name}
-                          </div>
-                          <div className="inline-block mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 font-mono text-xs font-bold text-blue-700">
-                            {emp.code || emp.id}
-                          </div>
-                          <div className="text-[11px] text-slate-600 font-medium truncate mt-1">
-                            {emp.designation || 'Staff'}
-                          </div>
-                        </div>
+              {/* A4 Printable Sheet-by-Sheet Preview */}
+              {printableEmployees.length === 0 ? (
+                <div className="mx-auto max-w-[210mm] bg-white p-12 rounded-2xl shadow-sm border border-slate-200 text-center text-xs text-slate-400">
+                  Select one or more employees above to preview A4 QR badges or download ZIP.
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {badgePages.map((pageEmps, pageIdx) => (
+                    <div
+                      key={`preview-page-${pageIdx}`}
+                      className="mx-auto max-w-[210mm] bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-200"
+                    >
+                      <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-100 text-[11px] font-bold text-slate-500">
+                        <span>
+                          A4 Sheet {pageIdx + 1} of {badgePages.length}
+                        </span>
+                        <span>{pageEmps.length} Badges (2 × 4 A4 Portrait Layout)</span>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {pageEmps.map((emp) => renderBadgeCard(emp, false))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
         </div>
       </div>
     </div>
+
+      {typeof document !== 'undefined' &&
+        printableEmployees.length > 0 &&
+        createPortal(
+          <div id="qr-badges-a4-print-portal" className="hidden print:block">
+            {badgePages.map((pageEmps, pageIdx) => (
+              <div key={`print-page-${pageIdx}`} className="qr-a4-sheet">
+                <div className="grid grid-cols-2 gap-3">
+                  {pageEmps.map((emp) => renderBadgeCard(emp, true))}
+                </div>
+              </div>
+            ))}
+          </div>,
+          document.body
+        )}
+    </>
   );
 };
