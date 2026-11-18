@@ -1338,10 +1338,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return null;
   });
 
-  const getErpAuthHeaders = useCallback((): Record<string, string> => {
+  const getErpAuthHeaders = useCallback((overrideToken?: string | null): Record<string, string> => {
     const token =
-      erpSessionToken ||
+      overrideToken ||
       (typeof window !== 'undefined' ? localStorage.getItem('ensec_erp_session_token') : null) ||
+      erpSessionToken ||
       '';
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -1362,19 +1363,23 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return headers;
   }, [erpSessionToken, currentUser]);
 
-  const establishServerSession = useCallback(async (userObj: User) => {
-    if (typeof window === 'undefined' || !userObj?.id || userObj.id === 'guest') return;
+  const establishServerSession = useCallback(async (userObj: User): Promise<string | null> => {
+    if (typeof window === 'undefined' || !userObj?.id || userObj.id === 'guest') return null;
     try {
       const resp = await fetch('/api/auth/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: { ...userObj, password: '' } }),
       });
-      if (resp.ok) {
-        const data = await resp.json();
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+      const rawText = await resp.text();
+      const parsed = tryParseJsonSafe(rawText);
+      if (resp.ok && contentType.includes('application/json') && parsed.ok) {
+        const data = parsed.data;
         if (data?.token) {
           setErpSessionToken(data.token);
           localStorage.setItem('ensec_erp_session_token', data.token);
+          return String(data.token);
         }
       } else if (resp.status === 401 || resp.status === 403) {
         // Account deactivated or rejected server-side
@@ -1387,8 +1392,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStorage.removeItem('ensec_erp_session_token');
       }
     } catch {
-      // Offline / dev restart graceful fallback
+      // Offline / static SPA hosting graceful fallback
     }
+    return null;
   }, []);
 
   // Ensure server session token exists & stays valid when ERP user is authenticated
@@ -21204,7 +21210,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const submitQrAttendanceScan = async (qrPayload: string) => {
+    const qrLatestRecordsStore: Map<string, AttendanceRecord> =
+      (globalThis as any).__ensecLatestQrRecordsMap ||
+      ((globalThis as any).__ensecLatestQrRecordsMap = new Map<string, AttendanceRecord>());
+
     const applyScannedRecordToState = (scannedRecord: AttendanceRecord, alreadySynced: boolean) => {
+      const cacheKey = `${scannedRecord.employeeId || scannedRecord.fieldForceId || ''}_${scannedRecord.date}`;
+      qrLatestRecordsStore.set(cacheKey, scannedRecord);
       setAttendanceRecords((prev) => {
         const filtered = prev.filter(
           (a) =>
@@ -21307,14 +21319,17 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      // Check existing in memory state first, then Supabase if configured
-      let existing = attendanceRecords.find(
-        (a) =>
-          (a.employeeId === resolvedRep.id ||
-            a.fieldForceId === resolvedRep.id ||
-            (resolvedRep.code && a.employeeCode === resolvedRep.code)) &&
-          a.date === attendanceDate
-      );
+      // Check latest synchronous cache first, then memory state, then Supabase if configured
+      const qrLockKey = `${resolvedRep.id}_${attendanceDate}`;
+      let existing: AttendanceRecord | undefined =
+        qrLatestRecordsStore.get(qrLockKey) ||
+        attendanceRecords.find(
+          (a) =>
+            (a.employeeId === resolvedRep.id ||
+              a.fieldForceId === resolvedRep.id ||
+              (resolvedRep.code && a.employeeCode === resolvedRep.code)) &&
+            a.date === attendanceDate
+        );
 
       if (!existing) {
         const client = getSupabase();
@@ -21514,10 +21529,10 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     };
 
-    const sendScan = async () => {
+    const sendScan = async (overrideToken?: string | null) => {
       return fetch('/api/attendance/qr-scan', {
         method: 'POST',
-        headers: getErpAuthHeaders(),
+        headers: getErpAuthHeaders(overrideToken),
         body: JSON.stringify({
           qrPayload,
           employeesSnapshot: fieldForceReps,
@@ -21529,20 +21544,34 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       let resp = await sendScan();
       if (resp.status === 401 && isAuthenticated && currentUser?.id && currentUser.id !== 'guest') {
-        await establishServerSession(currentUser);
-        resp = await sendScan();
+        const freshToken = await establishServerSession(currentUser);
+        if (freshToken) {
+          resp = await sendScan(freshToken);
+        } else {
+          return await runClientQrFallback();
+        }
       }
 
       const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
       const rawText = await resp.text();
       const parsed = tryParseJsonSafe(rawText);
+      const data = parsed.data;
+      const isQrScanApiPayload =
+        Boolean(data) &&
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        ('success' in data || 'errorCode' in data || 'error' in data);
 
-      // On static SPA hosting (e.g. Firebase Hosting rewrite returning index.html), fall back cleanly
-      if (!contentType.includes('application/json') || !parsed.ok) {
+      // On static SPA hosting (e.g. Firebase Hosting rewrite returning index.html) or non-QR 200 JSON responses, fall back cleanly
+      if (
+        !contentType.includes('application/json') ||
+        !parsed.ok ||
+        (resp.ok && !isQrScanApiPayload) ||
+        resp.status >= 500
+      ) {
         return await runClientQrFallback();
       }
 
-      const data = parsed.data;
       if (!resp.ok || !data?.success) {
         return {
           success: false,
