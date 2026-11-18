@@ -124,6 +124,11 @@ input[type="number"] {
   margin: 7mm;
 }
 
+@page qr-badges-a4 {
+  size: A4 portrait;
+  margin: 10mm;
+}
+
 @media print {
   body.printing-ot-bill * {
     visibility: hidden;
@@ -194,6 +199,28 @@ input[type="number"] {
     overflow: visible !important;
     box-shadow: none !important;
     page: attendance-card-landscape;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.printing-qr-badges * {
+    visibility: hidden;
+  }
+  body.printing-qr-badges #qr-badges-a4-print,
+  body.printing-qr-badges #qr-badges-a4-print * {
+    visibility: visible;
+  }
+  body.printing-qr-badges #qr-badges-a4-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    page: qr-badges-a4;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }

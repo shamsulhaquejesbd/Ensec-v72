@@ -173,7 +173,7 @@ export interface OfficeLocation {
 // --------------------------------------------------------------------------
 // 2. Attendance Records & GPS Geofence Validation
 // --------------------------------------------------------------------------
-export type GPSValidationStatus = 'Accepted' | 'Rejected' | 'Manual';
+export type GPSValidationStatus = 'Accepted' | 'Rejected' | 'Manual' | 'QR Scan';
 
 export interface AttendanceRecord {
   id: string;
@@ -202,6 +202,9 @@ export interface AttendanceRecord {
   recordedBy?: string;
   createdAt?: string;
   updatedAt?: string;
+  scanMethod?: 'QR' | 'GPS' | 'Manual';
+  lastScanAt?: string;
+  scanCount?: number;
 
   // GPS Geofencing Fields
   assignedOfficeId?: string;

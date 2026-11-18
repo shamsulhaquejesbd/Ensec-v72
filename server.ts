@@ -14,11 +14,13 @@ import {
   DEFAULT_SHIFT_START_TIME,
   calculateShiftAttendanceStatus,
   evaluateGeofenceAttendance,
+  formatTime12Hour,
   isValidCoordinatePair,
 } from './src/lib/geofence.ts';
 import type {
   AttendanceRecord,
   OfficeLocation,
+  PayrollSettings,
   RejectedAttendanceAttempt,
 } from './src/types/payroll.ts';
 import type { FieldForceRep } from './src/types/erp.ts';
@@ -85,6 +87,84 @@ const lastEmployeeGpsPing = new Map<
   string,
   { latitude: number; longitude: number; timestampMs: number }
 >();
+const lastQrScanCooldownMap = new Map<string, number>(); // key: employeeId -> last accepted scan ms
+const attendanceLockQueues = new Map<string, Promise<void>>(); // key: `${employeeId}_${date}`
+let payrollSettingsStore: Partial<PayrollSettings> = {};
+const QR_SCAN_COOLDOWN_MS = 3000;
+
+async function withAttendanceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = attendanceLockQueues.get(key) || Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.then(() => next);
+  attendanceLockQueues.set(key, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (attendanceLockQueues.get(key) === chained) {
+      attendanceLockQueues.delete(key);
+    }
+  }
+}
+
+function getServerAttendanceDateTime(now = new Date()): {
+  date: string;
+  time24: string;
+  time24WithSeconds: string;
+  time12: string;
+  iso: string;
+} {
+  const tz = process.env.ATTENDANCE_TIMEZONE;
+  if (tz) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).formatToParts(now);
+      const getPart = (type: string) => parts.find((p) => p.type === type)?.value || '00';
+      const yr = getPart('year');
+      const mo = getPart('month');
+      const da = getPart('day');
+      const hr = getPart('hour') === '24' ? '00' : getPart('hour');
+      const mi = getPart('minute');
+      const se = getPart('second');
+      const time24 = `${hr}:${mi}`;
+      return {
+        date: `${yr}-${mo}-${da}`,
+        time24,
+        time24WithSeconds: `${hr}:${mi}:${se}`,
+        time12: formatTime12Hour(time24) || time24,
+        iso: now.toISOString(),
+      };
+    } catch {
+      // Fallback to server local calendar & clock
+    }
+  }
+  const yr = now.getFullYear();
+  const mo = String(now.getMonth() + 1).padStart(2, '0');
+  const da = String(now.getDate()).padStart(2, '0');
+  const hr = String(now.getHours()).padStart(2, '0');
+  const mi = String(now.getMinutes()).padStart(2, '0');
+  const se = String(now.getSeconds()).padStart(2, '0');
+  const time24 = `${hr}:${mi}`;
+  return {
+    date: `${yr}-${mo}-${da}`,
+    time24,
+    time24WithSeconds: `${hr}:${mi}:${se}`,
+    time12: formatTime12Hour(time24) || time24,
+    iso: now.toISOString(),
+  };
+}
 
 interface ResolvedOfficeConfig {
   assignedOfficeId: string;
@@ -1039,6 +1119,62 @@ export function createAppServer() {
     }
   };
 
+  const ERP_QR_SECRET =
+    process.env.ERP_QR_SECRET ||
+    crypto.createHash('sha256').update(`${SUPABASE_URL}:ensec-employee-qr-v1`).digest('hex');
+
+  const signEmployeeQrToken = (employeeId: string, employeeCode: string): string => {
+    const cleanId = String(employeeId || '').trim();
+    const cleanCode = String(employeeCode || cleanId).trim();
+    const idB64 = Buffer.from(cleanId, 'utf8').toString('base64url');
+    const codeB64 = Buffer.from(cleanCode, 'utf8').toString('base64url');
+    const body = `ENS1.${idB64}.${codeB64}`;
+    const sig = crypto
+      .createHmac('sha256', ERP_QR_SECRET)
+      .update(body)
+      .digest('base64url')
+      .slice(0, 16);
+    return `${body}.${sig}`;
+  };
+
+  const verifyEmployeeQrToken = (
+    rawPayload: string
+  ): { valid: boolean; employeeId?: string; employeeCode?: string; reason?: string } => {
+    const trimmed = String(rawPayload || '').trim();
+    if (!trimmed) {
+      return { valid: false, reason: 'Empty QR code payload.' };
+    }
+    const parts = trimmed.split('.');
+    if (parts.length !== 4 || parts[0] !== 'ENS1') {
+      return {
+        valid: false,
+        reason: 'Invalid employee QR code format. Only official Ensec Employee QR badges are accepted.',
+      };
+    }
+    const [prefix, idB64, codeB64, sig] = parts;
+    const body = `${prefix}.${idB64}.${codeB64}`;
+    const expectedSig = crypto
+      .createHmac('sha256', ERP_QR_SECRET)
+      .update(body)
+      .digest('base64url')
+      .slice(0, 16);
+    try {
+      const a = Buffer.from(sig, 'utf8');
+      const b = Buffer.from(expectedSig, 'utf8');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return { valid: false, reason: 'QR code security signature verification failed.' };
+      }
+      const employeeId = Buffer.from(idB64, 'base64url').toString('utf8').trim();
+      const employeeCode = Buffer.from(codeB64, 'base64url').toString('utf8').trim();
+      if (!employeeId) {
+        return { valid: false, reason: 'QR code does not contain a valid employee ID.' };
+      }
+      return { valid: true, employeeId, employeeCode };
+    } catch {
+      return { valid: false, reason: 'Unable to decode employee QR code payload.' };
+    }
+  };
+
   const indexUserInMfgCache = (u: any) => {
     if (!u || typeof u !== 'object') return;
     if (u.id) mfgUsersCache.set(String(u.id).toLowerCase(), u);
@@ -1333,11 +1469,441 @@ export function createAppServer() {
         }
       }
     }
+    if (Array.isArray(body.attendanceRecords)) {
+      for (const attRec of body.attendanceRecords) {
+        if (attRec && attRec.employeeId && attRec.date) {
+          const k = `${attRec.employeeId}_${attRec.date}`;
+          if (!attendanceRecordsStore.has(k)) {
+            attendanceRecordsStore.set(k, attRec);
+          }
+        }
+      }
+    }
+    if (body.payrollSettings && typeof body.payrollSettings === 'object') {
+      payrollSettingsStore = { ...payrollSettingsStore, ...body.payrollSettings };
+    }
     res.json({ ok: true });
   };
 
   app.post('/api/manufacturing/sync-state', handleSyncContext);
   app.post('/api/erp/sync-context', handleSyncContext);
+
+  // --------------------------------------------------------------------------
+  // Employee QR Code Token Issuance & Automatic QR Attendance Scanning
+  // --------------------------------------------------------------------------
+  app.post('/api/employees/qr-tokens', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        error: 'Authentication required to generate employee QR codes.',
+      });
+    }
+
+    const reqEmployees = Array.isArray(req.body?.employees) ? req.body.employees : [];
+    const tokens: Record<string, string> = {};
+    const tokenByCode: Record<string, string> = {};
+
+    for (const item of reqEmployees) {
+      if (!item || !item.id) continue;
+      const empId = String(item.id).trim();
+      const cachedRep = fieldForceRepsCache.get(empId);
+      const empCode = String(item.code || cachedRep?.code || empId).trim();
+      const token = signEmployeeQrToken(empId, empCode);
+      tokens[empId] = token;
+      if (empCode) {
+        tokenByCode[empCode] = token;
+      }
+    }
+
+    if (reqEmployees.length === 0) {
+      for (const rep of fieldForceRepsCache.values()) {
+        if (!rep?.id) continue;
+        const empCode = String(rep.code || rep.id).trim();
+        const token = signEmployeeQrToken(rep.id, empCode);
+        tokens[rep.id] = token;
+        if (empCode) tokenByCode[empCode] = token;
+      }
+    }
+
+    return res.status(200).json({ tokens, tokenByCode });
+  });
+
+  app.post('/api/attendance/qr-scan', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'UNAUTHORIZED',
+        error: 'Authentication required. Please sign in to Ensec ERP to scan attendance.',
+      });
+    }
+
+    const roleStr = String(caller.role || '');
+    const isAdminOrHr = ['Super Admin', 'Admin', 'HR', 'Manager', 'Accountant'].includes(roleStr);
+    const pagePerms = caller.permissions?.pagePermissions;
+    const payrollTabs = caller.permissions?.payrollTabs;
+    if (
+      !isAdminOrHr &&
+      ((pagePerms?.payroll && pagePerms.payroll.view === false) ||
+        (payrollTabs && payrollTabs.attendance === false))
+    ) {
+      return res.status(403).json({
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'ATTENDANCE_SCAN_FORBIDDEN',
+        error: 'You do not have permission to record attendance on this page.',
+      });
+    }
+
+    const body = req.body || {};
+    const qrPayload = String(body.qrPayload || body.qrToken || body.token || '').trim();
+    const verified = verifyEmployeeQrToken(qrPayload);
+    if (!verified.valid || !verified.employeeId) {
+      return res.status(400).json({
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'INVALID_QR_CODE',
+        error: verified.reason || 'Invalid employee QR code.',
+      });
+    }
+
+    if (Array.isArray(body.employeesSnapshot)) {
+      for (const rep of body.employeesSnapshot) {
+        indexFieldForceRepInCache(rep);
+      }
+    }
+    if (body.payrollSettings && typeof body.payrollSettings === 'object') {
+      payrollSettingsStore = { ...payrollSettingsStore, ...body.payrollSettings };
+    }
+
+    // Resolve authoritative employee record from cache or Supabase
+    let resolvedRep: FieldForceRep | undefined = fieldForceRepsCache.get(verified.employeeId);
+    if (!resolvedRep && verified.employeeCode) {
+      for (const rep of fieldForceRepsCache.values()) {
+        if (
+          rep.code &&
+          rep.code.toLowerCase() === verified.employeeCode.toLowerCase() &&
+          String(rep.id) === String(verified.employeeId)
+        ) {
+          resolvedRep = rep;
+          break;
+        }
+      }
+    }
+    if (!resolvedRep && serverSupabase) {
+      try {
+        const { data: row } = await serverSupabase
+          .from('field_force_reps')
+          .select('*')
+          .eq('id', verified.employeeId)
+          .maybeSingle();
+        if (row) {
+          resolvedRep = {
+            ...(row as any),
+            id: String(row.id),
+            code: row.code || verified.employeeCode || String(row.id),
+            name: row.name || 'Employee',
+            department: row.department || 'Operations',
+            designation: row.designation || 'Executive',
+            employeeCategory: row.employee_category || row.employeeCategory,
+            status: row.status || 'Active',
+            isActive: row.is_active !== false,
+            assignedOfficeId: row.assigned_office_id || row.assignedOfficeId,
+            assignedOfficeName: row.assigned_office_name || row.assignedOfficeName,
+            branchWorkplace: row.branch_workplace || row.branchWorkplace,
+            shiftStartTime: row.shift_start_time || row.shiftStartTime,
+            shiftEndTime: row.shift_end_time || row.shiftEndTime,
+            gracePeriodMinutes: row.grace_period_minutes ?? row.gracePeriodMinutes,
+          } as FieldForceRep;
+          indexFieldForceRepInCache(resolvedRep);
+        }
+      } catch {
+        // Ignore and fall back to not found if missing
+      }
+    }
+
+    if (!resolvedRep) {
+      return res.status(404).json({
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'EMPLOYEE_NOT_FOUND',
+        error: `No matching employee record found for ID ${verified.employeeCode || verified.employeeId}.`,
+      });
+    }
+
+    const isEmpInactive =
+      resolvedRep.status === 'Inactive' ||
+      resolvedRep.isActive === false ||
+      resolvedRep.employmentStatus === 'Inactive' ||
+      resolvedRep.employmentStatus === 'Terminated';
+    if (isEmpInactive) {
+      return res.status(403).json({
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'EMPLOYEE_INACTIVE',
+        error: `${resolvedRep.name} (${resolvedRep.code}) is currently Inactive and cannot record attendance.`,
+        employee: {
+          id: resolvedRep.id,
+          code: resolvedRep.code,
+          name: resolvedRep.name,
+          department: resolvedRep.department,
+          designation: resolvedRep.designation,
+          employeeCategory: resolvedRep.employeeCategory,
+        },
+      });
+    }
+
+    const serverClock = getServerAttendanceDateTime(new Date());
+    const attendanceDate = serverClock.date;
+    const scanTime24 = serverClock.time24;
+    const lockKey = `${resolvedRep.id}_${attendanceDate}`;
+    const cooldownOverrideMs = Number(body._testCooldownMs);
+    const effectiveCooldownMs =
+      Number.isFinite(cooldownOverrideMs) && cooldownOverrideMs >= 0
+        ? cooldownOverrideMs
+        : QR_SCAN_COOLDOWN_MS;
+
+    return await withAttendanceLock(lockKey, async () => {
+      const nowMs = Date.now();
+      const prevScanMs = lastQrScanCooldownMap.get(resolvedRep!.id);
+      if (prevScanMs && nowMs - prevScanMs < effectiveCooldownMs) {
+        const remainingMs = effectiveCooldownMs - (nowMs - prevScanMs);
+        const existingRec = attendanceRecordsStore.get(lockKey);
+        return res.status(429).json({
+          success: false,
+          duplicateBlocked: true,
+          errorCode: 'DUPLICATE_SCAN_COOLDOWN',
+          cooldownRemainingMs: remainingMs,
+          error: `Please wait ${Math.ceil(remainingMs / 1000)}s before scanning ${resolvedRep!.name} again.`,
+          employee: {
+            id: resolvedRep!.id,
+            code: resolvedRep!.code,
+            name: resolvedRep!.name,
+            department: resolvedRep!.department,
+            designation: resolvedRep!.designation,
+            employeeCategory: resolvedRep!.employeeCategory,
+          },
+          date: attendanceDate,
+          record: existingRec,
+        });
+      }
+
+      // Reconcile existing attendance record from memory store, Supabase DB, or client snapshot fallback
+      let existing = attendanceRecordsStore.get(lockKey);
+      if (!existing && serverSupabase) {
+        try {
+          const { data: dbRow } = await serverSupabase
+            .from('employee_attendances')
+            .select('*')
+            .eq('employee_id', resolvedRep!.id)
+            .eq('date', attendanceDate)
+            .maybeSingle();
+          if (dbRow) {
+            existing = {
+              id: String(dbRow.id),
+              fieldForceId: String(dbRow.employee_id),
+              employeeId: String(dbRow.employee_id),
+              employeeCode: dbRow.employee_code || resolvedRep!.code,
+              employeeName: dbRow.employee_name || resolvedRep!.name,
+              department: dbRow.department || resolvedRep!.department,
+              designation: dbRow.designation || resolvedRep!.designation,
+              date: String(dbRow.date),
+              status: dbRow.status || 'Present',
+              inTime: dbRow.in_time || undefined,
+              checkInTime: dbRow.in_time || undefined,
+              outTime: dbRow.out_time || undefined,
+              checkOutTime: dbRow.out_time || undefined,
+              workHours: Number(dbRow.work_hours) || 0,
+              overtimeHours: Number(dbRow.overtime_hours) || 0,
+              lateDurationMinutes: Number(dbRow.late_duration_minutes) || 0,
+              lateMinutes: Number(dbRow.late_duration_minutes) || 0,
+              gpsValidationStatus: (dbRow.gps_validation_status || 'Manual') as AttendanceRecord['gpsValidationStatus'],
+              remarks: dbRow.remarks || undefined,
+              createdAt: dbRow.created_at || undefined,
+              updatedAt: dbRow.updated_at || undefined,
+            };
+            attendanceRecordsStore.set(lockKey, existing);
+          }
+        } catch {
+          // Ignore DB lookup fallback errors
+        }
+      }
+      if (!existing && body.existingRecord && body.existingRecord.date === attendanceDate) {
+        const snap = body.existingRecord as AttendanceRecord;
+        if (
+          String(snap.employeeId || snap.fieldForceId || '') === String(resolvedRep!.id) ||
+          (resolvedRep!.code && snap.employeeCode === resolvedRep!.code)
+        ) {
+          existing = snap;
+          attendanceRecordsStore.set(lockKey, existing);
+        }
+      }
+
+      const shiftStartTime =
+        resolvedRep!.shiftStartTime || payrollSettingsStore.shiftStartTime || DEFAULT_SHIFT_START_TIME;
+      const gracePeriodMinutes =
+        resolvedRep!.gracePeriodMinutes ??
+        payrollSettingsStore.lateGracePeriodMinutes ??
+        DEFAULT_GRACE_PERIOD_MINUTES;
+      const standardDailyHours =
+        payrollSettingsStore.standardDailyHours ||
+        payrollSettingsStore.standardWorkHoursPerDay ||
+        8;
+
+      const existingIn = String(existing?.inTime || existing?.checkInTime || '').trim();
+      const existingOut = String(existing?.outTime || existing?.checkOutTime || '').trim();
+      const nowIso = serverClock.iso;
+
+      let action: 'IN' | 'OUT' | 'OUT_UPDATE';
+      let statusMessage: string;
+      let nextRecord: AttendanceRecord;
+
+      if (!existing || !existingIn || existing.status === 'Absent') {
+        // 1st Scan — Record IN Time
+        action = 'IN';
+        statusMessage = 'IN Recorded Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+
+        nextRecord = {
+          id: existing?.id || `att-qr-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 5)}`,
+          userId: caller.id,
+          fieldForceId: resolvedRep!.id,
+          employeeId: resolvedRep!.id,
+          employeeCode: resolvedRep!.code || undefined,
+          employeeName: resolvedRep!.name,
+          employeeCategory: resolvedRep!.employeeCategory as AttendanceRecord['employeeCategory'],
+          department: resolvedRep!.department || 'Operations',
+          designation: resolvedRep!.designation,
+          assignedOfficeId: resolvedRep!.assignedOfficeId,
+          assignedOfficeName: resolvedRep!.assignedOfficeName || resolvedRep!.branchWorkplace,
+          date: attendanceDate,
+          status: shiftCalc.status,
+          inTime: scanTime24,
+          checkInTime: scanTime24,
+          outTime: undefined,
+          checkOutTime: undefined,
+          workHours: 0,
+          overtimeHours: 0,
+          isLate: shiftCalc.isLate,
+          lateMinutes: shiftCalc.lateDurationMinutes,
+          lateDurationMinutes: shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: 1,
+          lastScanAt: nowIso,
+          validationReason: `QR Scan IN at ${serverClock.time12} (${serverClock.date})`,
+          remarks: `QR Scan IN at ${serverClock.time12}`,
+          recordedBy: caller.name || 'QR Attendance Scanner',
+          createdAt: existing?.createdAt || nowIso,
+          updatedAt: nowIso,
+        };
+      } else if (!existingOut) {
+        // 2nd Scan — Record OUT Time (preserve original IN Time untouched!)
+        action = 'OUT';
+        statusMessage = 'OUT Recorded Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: existingIn,
+          checkOutTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+
+        nextRecord = {
+          ...existing,
+          inTime: existingIn,
+          checkInTime: existingIn,
+          outTime: scanTime24,
+          checkOutTime: scanTime24,
+          workHours: shiftCalc.totalWorkingHours,
+          overtimeHours: shiftCalc.overtimeHours,
+          status: existing.isLate || existing.status === 'Late' ? 'Late' : shiftCalc.status,
+          isLate: existing.isLate ?? shiftCalc.isLate,
+          lateMinutes: existing.lateMinutes ?? existing.lateDurationMinutes ?? shiftCalc.lateDurationMinutes,
+          lateDurationMinutes:
+            existing.lateDurationMinutes ?? existing.lateMinutes ?? shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: existing.gpsValidationStatus === 'Accepted' ? 'Accepted' : 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: Math.max(2, (existing.scanCount || 1) + 1),
+          lastScanAt: nowIso,
+          validationReason: `QR Scan OUT at ${serverClock.time12}`,
+          remarks: `${existing.remarks || `IN ${formatTime12Hour(existingIn) || existingIn}`} | QR Scan OUT at ${serverClock.time12}`,
+          updatedAt: nowIso,
+        };
+      } else {
+        // 3rd+ Scan — Update ONLY OUT Time (NEVER overwrite first IN Time!)
+        action = 'OUT_UPDATE';
+        statusMessage = 'OUT Updated Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: existingIn,
+          checkOutTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+
+        const baseRemarks = String(existing.remarks || `IN ${formatTime12Hour(existingIn) || existingIn}`)
+          .split('|')[0]
+          .trim();
+
+        nextRecord = {
+          ...existing,
+          inTime: existingIn,
+          checkInTime: existingIn,
+          outTime: scanTime24,
+          checkOutTime: scanTime24,
+          workHours: shiftCalc.totalWorkingHours,
+          overtimeHours: shiftCalc.overtimeHours,
+          status: existing.isLate || existing.status === 'Late' ? 'Late' : shiftCalc.status,
+          isLate: existing.isLate ?? shiftCalc.isLate,
+          lateMinutes: existing.lateMinutes ?? existing.lateDurationMinutes ?? shiftCalc.lateDurationMinutes,
+          lateDurationMinutes:
+            existing.lateDurationMinutes ?? existing.lateMinutes ?? shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: existing.gpsValidationStatus === 'Accepted' ? 'Accepted' : 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: Math.max(3, (existing.scanCount || 2) + 1),
+          lastScanAt: nowIso,
+          validationReason: `QR Scan OUT updated at ${serverClock.time12}`,
+          remarks: `${baseRemarks} | QR Scan OUT updated at ${serverClock.time12}`,
+          updatedAt: nowIso,
+        };
+      }
+
+      lastQrScanCooldownMap.set(resolvedRep!.id, Date.now());
+      const dbResult = await persistAcceptedAttendance(nextRecord);
+
+      return res.status(200).json({
+        success: true,
+        duplicateBlocked: false,
+        action,
+        statusLabel: action === 'IN' ? 'IN' : 'OUT',
+        statusMessage,
+        date: attendanceDate,
+        recordedTime24: scanTime24,
+        recordedTime12: serverClock.time12,
+        inTime: nextRecord.inTime || nextRecord.checkInTime,
+        outTime: nextRecord.outTime || nextRecord.checkOutTime,
+        employee: {
+          id: resolvedRep!.id,
+          code: resolvedRep!.code,
+          name: resolvedRep!.name,
+          department: resolvedRep!.department,
+          designation: resolvedRep!.designation,
+          employeeCategory: resolvedRep!.employeeCategory,
+        },
+        record: nextRecord,
+        dbSynced: dbResult.dbSynced,
+        dbError: dbResult.dbError,
+        dbCode: dbResult.dbCode,
+      });
+    });
+  });
 
   app.post('/api/auth/session', async (req, res) => {
     const body = req.body || {};

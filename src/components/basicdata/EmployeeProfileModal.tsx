@@ -32,10 +32,12 @@ import {
   HelpCircle,
   UserCheck,
   Navigation,
+  QrCode,
 } from 'lucide-react';
 import { FieldForceRep } from '../../types/erp';
 import { useERP } from '../../context/ERPContext';
 import { formatLateDuration } from '../../lib/geofence.ts';
+import { EmployeeQrSingleModal } from './EmployeeQrModal.tsx';
 
 interface EmployeeProfileModalProps {
   employee: FieldForceRep;
@@ -73,6 +75,7 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
   } = useERP();
 
   const [activeTab, setActiveTab] = useState<ProfileTab>('personal');
+  const [showQrModal, setShowQrModal] = useState<boolean>(false);
 
   // Associated Data Lookups
   const salaryStructure = useMemo(() => {
@@ -209,7 +212,15 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowQrModal(true)}
+                className="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/30 text-emerald-200 text-xs font-bold flex items-center gap-1.5 transition"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>QR Code</span>
+              </button>
               <button
                 type="button"
                 onClick={handlePrint}
@@ -1081,6 +1092,12 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
         </div>
 
       </div>
+
+      <EmployeeQrSingleModal
+        isOpen={showQrModal}
+        employee={employee}
+        onClose={() => setShowQrModal(false)}
+      />
     </div>
   );
 };

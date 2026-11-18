@@ -59,6 +59,7 @@ import {
   Copy,
   RefreshCw,
   ExternalLink,
+  QrCode,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useERP } from '../../context/ERPContext.tsx';
@@ -98,6 +99,7 @@ import { FieldForceRep } from '../../types/erp.ts';
 import { EmployeeAttendanceCardModal } from './EmployeeAttendanceCardModal.tsx';
 import { DailyWagesBillFactory } from './DailyWagesBillFactory.tsx';
 import { Time12HourInput } from '../common/Time12HourInput.tsx';
+import { QrAttendanceScannerModal } from './QrAttendanceScannerModal.tsx';
 import {
   PayrollTab,
   PAYROLL_SUBPAGE_DEFS,
@@ -341,6 +343,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
 
   const [showAttendanceModal, setShowAttendanceModal] = useState<boolean>(false);
   const [showBulkAttendanceModal, setShowBulkAttendanceModal] = useState<boolean>(false);
+  const [showQrScannerModal, setShowQrScannerModal] = useState<boolean>(false);
   const [selectedDateForAtt, setSelectedDateForAtt] = useState<string>(todayIso);
 
   const [showLeaveModal, setShowLeaveModal] = useState<boolean>(false);
@@ -1871,6 +1874,15 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 </button>
               </div>
 
+              <button
+                type="button"
+                onClick={() => setShowQrScannerModal(true)}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-colors"
+              >
+                <QrCode className="w-4 h-4" />
+                <span>QR Code Scanner</span>
+              </button>
+
               {canExportPayroll && attSubView !== 'daily_wages_bill' && (
                 <button
                   onClick={handleExportAttendanceExcel}
@@ -2612,6 +2624,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                                 className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
                                   gpsStatus === 'Accepted'
                                     ? 'bg-emerald-100 text-emerald-800'
+                                    : gpsStatus === 'QR Scan'
+                                    ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-300'
                                     : gpsStatus === 'Rejected'
                                     ? 'bg-rose-100 text-rose-800'
                                     : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
@@ -5279,6 +5293,30 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
         initialEmployeeId={attendanceCardModal.employeeId}
         initialMonthYear={attendanceCardModal.monthYear}
         onClose={() => setAttendanceCardModal({ isOpen: false })}
+      />
+
+      <QrAttendanceScannerModal
+        isOpen={showQrScannerModal}
+        onClose={() => setShowQrScannerModal(false)}
+        onScanRecorded={(result) => {
+          if (result.date) {
+            setSelectedDateForAtt(result.date);
+            if (result.date > attDateTo) {
+              setAttDateTo(result.date);
+            }
+            if (result.date < attDateFrom) {
+              setAttDateFrom(result.date);
+            }
+          }
+          if (result.employeeName) {
+            setAttendanceFeedback({
+              type: 'success',
+              message: `QR Attendance: ${result.employeeName} (${result.employeeCode}) — ${
+                result.action === 'IN' ? 'IN' : 'OUT'
+              } recorded at ${result.time12}.`,
+            });
+          }
+        }}
       />
     </div>
   );

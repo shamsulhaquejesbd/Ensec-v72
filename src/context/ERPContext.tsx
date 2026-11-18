@@ -816,6 +816,31 @@ interface ERPContextType {
     record?: AttendanceRecord;
     rejectedAttempt?: RejectedAttendanceAttempt;
   }>;
+  submitQrAttendanceScan: (qrPayload: string) => Promise<{
+    success: boolean;
+    duplicateBlocked?: boolean;
+    cooldownRemainingMs?: number;
+    errorCode?: string;
+    error?: string;
+    action?: 'IN' | 'OUT' | 'OUT_UPDATE';
+    statusLabel?: 'IN' | 'OUT';
+    statusMessage?: string;
+    date?: string;
+    recordedTime24?: string;
+    recordedTime12?: string;
+    inTime?: string;
+    outTime?: string;
+    employee?: {
+      id: string;
+      code: string;
+      name: string;
+      department?: string;
+      designation?: string;
+      employeeCategory?: string;
+    };
+    record?: AttendanceRecord;
+    dbSynced?: boolean;
+  }>;
   getEmployeeAttendanceSummary: (fieldForceId: string, monthYear: string) => any;
 
   leaveRecords: LeaveRecord[];
@@ -2586,6 +2611,17 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       body: JSON.stringify({ records: attendanceRecords }),
     }).catch(() => {});
   }, [attendanceRecords]);
+
+  useEffect(() => {
+    fetch('/api/erp/sync-context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fieldForceReps,
+        payrollSettings,
+      }),
+    }).catch(() => {});
+  }, [fieldForceReps, payrollSettings]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -21162,6 +21198,95 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const submitQrAttendanceScan = async (qrPayload: string) => {
+    const sendScan = async () => {
+      return fetch('/api/attendance/qr-scan', {
+        method: 'POST',
+        headers: getErpAuthHeaders(),
+        body: JSON.stringify({
+          qrPayload,
+          employeesSnapshot: fieldForceReps,
+          payrollSettings,
+        }),
+      });
+    };
+
+    try {
+      let resp = await sendScan();
+      if (resp.status === 401 && isAuthenticated && currentUser?.id && currentUser.id !== 'guest') {
+        await establishServerSession(currentUser);
+        resp = await sendScan();
+      }
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          duplicateBlocked: Boolean(data?.duplicateBlocked || resp.status === 429),
+          cooldownRemainingMs: data?.cooldownRemainingMs,
+          errorCode: data?.errorCode,
+          error: data?.error || `Failed to process QR attendance scan (HTTP ${resp.status}).`,
+          employee: data?.employee,
+          date: data?.date,
+          record: data?.record,
+        };
+      }
+
+      const scannedRecord = data.record as AttendanceRecord | undefined;
+      let finalDbSynced = Boolean(data.dbSynced);
+      if (scannedRecord) {
+        setAttendanceRecords((prev) => {
+          const filtered = prev.filter(
+            (a) =>
+              !(
+                (a.employeeId === scannedRecord.employeeId ||
+                  a.fieldForceId === scannedRecord.employeeId) &&
+                a.date === scannedRecord.date
+              )
+          );
+          const nextSnapshot = [scannedRecord, ...filtered];
+          if (!data.dbSynced) {
+            void persistAttendanceRecordsToSupabase([scannedRecord], nextSnapshot);
+          } else {
+            setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
+          }
+          return nextSnapshot;
+        });
+      }
+
+      if (data?.employee?.name) {
+        addAuditLog(
+          data.action === 'IN' ? 'QR_ATTENDANCE_IN' : 'QR_ATTENDANCE_OUT',
+          'Payroll & HR Attendance',
+          `${data.employee.name} (${data.employee.code || data.employee.id}) — ${data.statusMessage || data.action} at ${data.recordedTime12 || data.recordedTime24} (${data.date})`
+        );
+      }
+
+      return {
+        success: true,
+        duplicateBlocked: false,
+        action: data.action,
+        statusLabel: data.statusLabel,
+        statusMessage: data.statusMessage,
+        date: data.date,
+        recordedTime24: data.recordedTime24,
+        recordedTime12: data.recordedTime12,
+        inTime: data.inTime,
+        outTime: data.outTime,
+        employee: data.employee,
+        record: scannedRecord,
+        dbSynced: finalDbSynced,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        duplicateBlocked: false,
+        errorCode: 'NETWORK_ERROR',
+        error: err?.message || 'Network error while recording QR attendance.',
+      };
+    }
+  };
+
   const getEmployeeAttendanceSummary = (employeeId: string, monthYear: string) => {
     const [year, month] = monthYear.split('-').map(Number);
     const recs = attendanceRecords.filter(
@@ -23819,6 +23944,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         bulkMarkAttendance,
         submitGpsCheckIn,
         submitGpsCheckOut,
+        submitQrAttendanceScan,
         getEmployeeAttendanceSummary,
         applyLeave,
         approveLeave,
