@@ -1,6 +1,7 @@
 import QRCode from 'qrcode';
 import JSZip from 'jszip';
 import type { FieldForceRep } from '../types/erp';
+import { getSupabaseUrl } from './supabase';
 
 export interface EmployeeQrTokenMap {
   [employeeId: string]: string;
@@ -10,14 +11,119 @@ const tokenCache = new Map<string, string>();
 
 const makeCacheKey = (id: string, code?: string) => `${String(id).trim()}::${String(code || '').trim()}`;
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function base64UrlToString(b64url: string): string {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64url.length + 3) % 4);
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function computeQrHmacSig(body: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error('WebCrypto API is unavailable in this browser context.');
+  }
+  const enc = new TextEncoder();
+  const secretSeed = `${getSupabaseUrl()}:ensec-employee-qr-v1`;
+  const secretHashBuf = await subtle.digest('SHA-256', enc.encode(secretSeed));
+  const secretHex = Array.from(new Uint8Array(secretHashBuf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  const hmacKey = await subtle.importKey(
+    'raw',
+    enc.encode(secretHex),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sigBuf = await subtle.sign('HMAC', hmacKey, enc.encode(body));
+  return bytesToBase64Url(new Uint8Array(sigBuf)).slice(0, 16);
+}
+
+export async function signEmployeeQrTokenLocal(
+  employeeId: string,
+  employeeCode?: string
+): Promise<string> {
+  const enc = new TextEncoder();
+  const cleanId = String(employeeId || '').trim();
+  const cleanCode = String(employeeCode || cleanId).trim();
+  const idB64 = bytesToBase64Url(enc.encode(cleanId));
+  const codeB64 = bytesToBase64Url(enc.encode(cleanCode));
+  const body = `ENS1.${idB64}.${codeB64}`;
+  const sig = await computeQrHmacSig(body);
+  return `${body}.${sig}`;
+}
+
+export async function verifyEmployeeQrTokenLocal(
+  rawPayload: string
+): Promise<{ valid: boolean; employeeId?: string; employeeCode?: string; reason?: string }> {
+  const trimmed = String(rawPayload || '').trim();
+  if (!trimmed) {
+    return { valid: false, reason: 'Empty QR code payload.' };
+  }
+  const parts = trimmed.split('.');
+  if (parts.length !== 4 || parts[0] !== 'ENS1') {
+    return {
+      valid: false,
+      reason: 'Invalid employee QR code format. Only official Ensec Employee QR badges are accepted.',
+    };
+  }
+  const [prefix, idB64, codeB64, sig] = parts;
+  const body = `${prefix}.${idB64}.${codeB64}`;
+  try {
+    const expectedSig = await computeQrHmacSig(body);
+    if (sig.length !== expectedSig.length) {
+      return { valid: false, reason: 'QR code security signature verification failed.' };
+    }
+    let diff = 0;
+    for (let i = 0; i < sig.length; i++) {
+      diff |= sig.charCodeAt(i) ^ expectedSig.charCodeAt(i);
+    }
+    if (diff !== 0) {
+      return { valid: false, reason: 'QR code security signature verification failed.' };
+    }
+    const employeeId = base64UrlToString(idB64).trim();
+    const employeeCode = base64UrlToString(codeB64).trim();
+    if (!employeeId) {
+      return { valid: false, reason: 'QR code does not contain a valid employee ID.' };
+    }
+    return { valid: true, employeeId, employeeCode };
+  } catch {
+    return { valid: false, reason: 'Unable to decode employee QR code payload.' };
+  }
+}
+
+export function tryParseJsonSafe(rawText: string): { ok: boolean; data: any } {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed || trimmed.startsWith('<')) {
+    return { ok: false, data: null };
+  }
+  try {
+    return { ok: true, data: JSON.parse(trimmed) };
+  } catch {
+    return { ok: false, data: null };
+  }
+}
+
 export function getCachedEmployeeQrToken(emp: Pick<FieldForceRep, 'id' | 'code'>): string | null {
   return tokenCache.get(makeCacheKey(emp.id, emp.code)) || null;
 }
 
 /**
- * Fetches permanent server-signed HMAC QR payloads for one or more employees.
- * The signed QR token encodes employeeId + employeeCode (never name alone) and
- * remains identical across sessions and restarts for the same employee record.
+ * Fetches permanent HMAC-signed QR payloads for one or more employees.
+ * Uses the Express backend when available and falls back seamlessly to matching
+ * WebCrypto HMAC-SHA256 signing when deployed on static SPA hosting (e.g. Firebase Hosting).
  */
 export async function fetchEmployeeQrTokens(
   employees: Array<Pick<FieldForceRep, 'id' | 'code'>>,
@@ -41,26 +147,44 @@ export async function fetchEmployeeQrTokens(
     return result;
   }
 
-  const resp = await fetch('/api/employees/qr-tokens', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
-    body: JSON.stringify({ employees: missing }),
-  });
+  try {
+    const resp = await fetch('/api/employees/qr-tokens', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
+      body: JSON.stringify({ employees: missing }),
+    });
 
-  if (!resp.ok) {
-    const errBody = await resp.json().catch(() => ({}));
-    throw new Error(errBody?.error || `Failed to generate secure employee QR tokens (HTTP ${resp.status}).`);
+    const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+    const rawText = await resp.text();
+    const parsed = tryParseJsonSafe(rawText);
+
+    if (resp.ok && contentType.includes('application/json') && parsed.ok && parsed.data?.tokens) {
+      const serverTokens: Record<string, string> = parsed.data.tokens || {};
+      let allMapped = true;
+      for (const emp of missing) {
+        const token = serverTokens[emp.id];
+        if (token) {
+          tokenCache.set(makeCacheKey(emp.id, emp.code), token);
+          result[emp.id] = token;
+        } else {
+          allMapped = false;
+        }
+      }
+      if (allMapped) {
+        return result;
+      }
+    }
+  } catch {
+    // Fall back to deterministic WebCrypto HMAC-SHA256 token generation
   }
 
-  const data = await resp.json();
-  const serverTokens: Record<string, string> = data?.tokens || {};
-
+  // Fallback for static SPA deployments (e.g., Firebase Hosting) or offline operation
   for (const emp of missing) {
-    const token = serverTokens[emp.id];
-    if (token) {
+    if (!result[emp.id]) {
+      const token = await signEmployeeQrTokenLocal(emp.id, emp.code);
       tokenCache.set(makeCacheKey(emp.id, emp.code), token);
       result[emp.id] = token;
     }

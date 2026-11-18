@@ -231,8 +231,13 @@ import {
   evaluateGeofenceAttendance,
   calculateNetWorkingHours,
   calculateShiftAttendanceStatus,
+  formatTime12Hour,
   isValidCoordinatePair,
 } from '../lib/geofence.ts';
+import {
+  verifyEmployeeQrTokenLocal,
+  tryParseJsonSafe,
+} from '../lib/employeeQr.ts';
 import {
   DEFAULT_PAYROLL_SETTINGS,
 } from '../mock/payrollData.ts';
@@ -21199,6 +21204,316 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const submitQrAttendanceScan = async (qrPayload: string) => {
+    const applyScannedRecordToState = (scannedRecord: AttendanceRecord, alreadySynced: boolean) => {
+      setAttendanceRecords((prev) => {
+        const filtered = prev.filter(
+          (a) =>
+            !(
+              (a.employeeId === scannedRecord.employeeId ||
+                a.fieldForceId === scannedRecord.employeeId) &&
+              a.date === scannedRecord.date
+            )
+        );
+        const nextSnapshot = [scannedRecord, ...filtered];
+        if (!alreadySynced) {
+          void persistAttendanceRecordsToSupabase([scannedRecord], nextSnapshot);
+        } else {
+          setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
+        }
+        return nextSnapshot;
+      });
+    };
+
+    const runClientQrFallback = async () => {
+      const verified = await verifyEmployeeQrTokenLocal(qrPayload);
+      if (!verified.valid || !verified.employeeId) {
+        return {
+          success: false,
+          duplicateBlocked: false,
+          errorCode: 'INVALID_QR_CODE',
+          error: verified.reason || 'Invalid employee QR code.',
+        };
+      }
+
+      const resolvedRep =
+        fieldForceReps.find((r) => String(r.id) === String(verified.employeeId)) ||
+        (verified.employeeCode
+          ? fieldForceReps.find(
+              (r) => r.code && r.code.toLowerCase() === verified.employeeCode!.toLowerCase()
+            )
+          : undefined);
+
+      if (!resolvedRep) {
+        return {
+          success: false,
+          duplicateBlocked: false,
+          errorCode: 'EMPLOYEE_NOT_FOUND',
+          error: `No matching employee record found for ID ${verified.employeeCode || verified.employeeId}.`,
+        };
+      }
+
+      const isEmpInactive =
+        resolvedRep.status === 'Inactive' ||
+        resolvedRep.isActive === false ||
+        resolvedRep.employmentStatus === 'Inactive' ||
+        resolvedRep.employmentStatus === 'Terminated';
+      if (isEmpInactive) {
+        return {
+          success: false,
+          duplicateBlocked: false,
+          errorCode: 'EMPLOYEE_INACTIVE',
+          error: `${resolvedRep.name} (${resolvedRep.code}) is currently Inactive and cannot record attendance.`,
+          employee: {
+            id: resolvedRep.id,
+            code: resolvedRep.code,
+            name: resolvedRep.name,
+            department: resolvedRep.department,
+            designation: resolvedRep.designation,
+            employeeCategory: resolvedRep.employeeCategory,
+          },
+        };
+      }
+
+      const now = new Date();
+      const attendanceDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate()
+      ).padStart(2, '0')}`;
+      const scanTime24 = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const time12 = formatTime12Hour(scanTime24) || scanTime24;
+      const nowIso = now.toISOString();
+
+      const qrCooldownStore: Map<string, number> =
+        (globalThis as any).__ensecQrCooldownMap ||
+        ((globalThis as any).__ensecQrCooldownMap = new Map<string, number>());
+      const prevScanMs = qrCooldownStore.get(resolvedRep.id);
+      const nowMs = Date.now();
+      if (prevScanMs && nowMs - prevScanMs < 3000) {
+        const remainingMs = 3000 - (nowMs - prevScanMs);
+        return {
+          success: false,
+          duplicateBlocked: true,
+          cooldownRemainingMs: remainingMs,
+          errorCode: 'DUPLICATE_SCAN_COOLDOWN',
+          error: `Please wait ${Math.ceil(remainingMs / 1000)}s before scanning ${resolvedRep.name} again.`,
+          employee: {
+            id: resolvedRep.id,
+            code: resolvedRep.code,
+            name: resolvedRep.name,
+            department: resolvedRep.department,
+            designation: resolvedRep.designation,
+            employeeCategory: resolvedRep.employeeCategory,
+          },
+          date: attendanceDate,
+        };
+      }
+
+      // Check existing in memory state first, then Supabase if configured
+      let existing = attendanceRecords.find(
+        (a) =>
+          (a.employeeId === resolvedRep.id ||
+            a.fieldForceId === resolvedRep.id ||
+            (resolvedRep.code && a.employeeCode === resolvedRep.code)) &&
+          a.date === attendanceDate
+      );
+
+      if (!existing) {
+        const client = getSupabase();
+        if (client && isSupabaseConfigured) {
+          try {
+            const { data: dbRow } = await client
+              .from('employee_attendances')
+              .select('*')
+              .eq('employee_id', resolvedRep.id)
+              .eq('date', attendanceDate)
+              .maybeSingle();
+            if (dbRow) {
+              existing = {
+                id: String(dbRow.id),
+                fieldForceId: String(dbRow.employee_id),
+                employeeId: String(dbRow.employee_id),
+                employeeCode: dbRow.employee_code || resolvedRep.code,
+                employeeName: dbRow.employee_name || resolvedRep.name,
+                department: dbRow.department || resolvedRep.department,
+                designation: dbRow.designation || resolvedRep.designation,
+                date: String(dbRow.date),
+                status: dbRow.status || 'Present',
+                inTime: dbRow.in_time || undefined,
+                checkInTime: dbRow.in_time || undefined,
+                outTime: dbRow.out_time || undefined,
+                checkOutTime: dbRow.out_time || undefined,
+                workHours: Number(dbRow.work_hours) || 0,
+                overtimeHours: Number(dbRow.overtime_hours) || 0,
+                lateDurationMinutes: Number(dbRow.late_duration_minutes) || 0,
+                lateMinutes: Number(dbRow.late_duration_minutes) || 0,
+                gpsValidationStatus: (dbRow.gps_validation_status || 'Manual') as AttendanceRecord['gpsValidationStatus'],
+                remarks: dbRow.remarks || undefined,
+                createdAt: dbRow.created_at || undefined,
+                updatedAt: dbRow.updated_at || undefined,
+              };
+            }
+          } catch {
+            // Fall back to local attendanceRecords state
+          }
+        }
+      }
+
+      const shiftStartTime =
+        resolvedRep.shiftStartTime || payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME;
+      const gracePeriodMinutes =
+        resolvedRep.gracePeriodMinutes ??
+        payrollSettings?.lateGracePeriodMinutes ??
+        DEFAULT_GRACE_PERIOD_MINUTES;
+      const standardDailyHours =
+        payrollSettings?.standardDailyHours || payrollSettings?.standardWorkHoursPerDay || 8;
+
+      const existingIn = String(existing?.inTime || existing?.checkInTime || '').trim();
+      const existingOut = String(existing?.outTime || existing?.checkOutTime || '').trim();
+
+      let action: 'IN' | 'OUT' | 'OUT_UPDATE';
+      let statusMessage: string;
+      let nextRecord: AttendanceRecord;
+
+      if (!existing || !existingIn || existing.status === 'Absent') {
+        action = 'IN';
+        statusMessage = 'IN Recorded Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+        nextRecord = {
+          id: existing?.id || `att-qr-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 5)}`,
+          userId: currentUser?.id,
+          fieldForceId: resolvedRep.id,
+          employeeId: resolvedRep.id,
+          employeeCode: resolvedRep.code || undefined,
+          employeeName: resolvedRep.name,
+          employeeCategory: resolvedRep.employeeCategory as EmployeeCategory | undefined,
+          department: resolvedRep.department || 'Operations',
+          designation: resolvedRep.designation,
+          assignedOfficeId: resolvedRep.assignedOfficeId,
+          assignedOfficeName: resolvedRep.assignedOfficeName || resolvedRep.branchWorkplace,
+          date: attendanceDate,
+          status: shiftCalc.status,
+          inTime: scanTime24,
+          checkInTime: scanTime24,
+          outTime: undefined,
+          checkOutTime: undefined,
+          workHours: 0,
+          overtimeHours: 0,
+          isLate: shiftCalc.isLate,
+          lateMinutes: shiftCalc.lateDurationMinutes,
+          lateDurationMinutes: shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: 1,
+          lastScanAt: nowIso,
+          validationReason: `QR Scan IN at ${time12} (${attendanceDate})`,
+          remarks: `QR Scan IN at ${time12}`,
+          recordedBy: currentUser?.name || 'QR Attendance Scanner',
+          createdAt: existing?.createdAt || nowIso,
+          updatedAt: nowIso,
+        };
+      } else if (!existingOut) {
+        action = 'OUT';
+        statusMessage = 'OUT Recorded Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: existingIn,
+          checkOutTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+        nextRecord = {
+          ...existing,
+          inTime: existingIn,
+          checkInTime: existingIn,
+          outTime: scanTime24,
+          checkOutTime: scanTime24,
+          workHours: shiftCalc.totalWorkingHours,
+          overtimeHours: shiftCalc.overtimeHours,
+          status: existing.isLate || existing.status === 'Late' ? 'Late' : shiftCalc.status,
+          isLate: existing.isLate ?? shiftCalc.isLate,
+          lateMinutes: existing.lateMinutes ?? existing.lateDurationMinutes ?? shiftCalc.lateDurationMinutes,
+          lateDurationMinutes:
+            existing.lateDurationMinutes ?? existing.lateMinutes ?? shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: existing.gpsValidationStatus === 'Accepted' ? 'Accepted' : 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: Math.max(2, (existing.scanCount || 1) + 1),
+          lastScanAt: nowIso,
+          validationReason: `QR Scan OUT at ${time12}`,
+          remarks: `${existing.remarks || `IN ${formatTime12Hour(existingIn) || existingIn}`} | QR Scan OUT at ${time12}`,
+          updatedAt: nowIso,
+        };
+      } else {
+        action = 'OUT_UPDATE';
+        statusMessage = 'OUT Updated Successfully';
+        const shiftCalc = calculateShiftAttendanceStatus({
+          checkInTime: existingIn,
+          checkOutTime: scanTime24,
+          shiftStartTime,
+          gracePeriodMinutes,
+          standardDailyHours,
+        });
+        const baseRemarks = String(existing.remarks || `IN ${formatTime12Hour(existingIn) || existingIn}`)
+          .split('|')[0]
+          .trim();
+        nextRecord = {
+          ...existing,
+          inTime: existingIn,
+          checkInTime: existingIn,
+          outTime: scanTime24,
+          checkOutTime: scanTime24,
+          workHours: shiftCalc.totalWorkingHours,
+          overtimeHours: shiftCalc.overtimeHours,
+          status: existing.isLate || existing.status === 'Late' ? 'Late' : shiftCalc.status,
+          isLate: existing.isLate ?? shiftCalc.isLate,
+          lateMinutes: existing.lateMinutes ?? existing.lateDurationMinutes ?? shiftCalc.lateDurationMinutes,
+          lateDurationMinutes:
+            existing.lateDurationMinutes ?? existing.lateMinutes ?? shiftCalc.lateDurationMinutes,
+          gpsValidationStatus: existing.gpsValidationStatus === 'Accepted' ? 'Accepted' : 'QR Scan',
+          scanMethod: 'QR',
+          scanCount: Math.max(3, (existing.scanCount || 2) + 1),
+          lastScanAt: nowIso,
+          validationReason: `QR Scan OUT updated at ${time12}`,
+          remarks: `${baseRemarks} | QR Scan OUT updated at ${time12}`,
+          updatedAt: nowIso,
+        };
+      }
+
+      qrCooldownStore.set(resolvedRep.id, Date.now());
+      applyScannedRecordToState(nextRecord, false);
+      addAuditLog(
+        action === 'IN' ? 'QR_ATTENDANCE_IN' : 'QR_ATTENDANCE_OUT',
+        'Payroll & HR Attendance',
+        `${resolvedRep.name} (${resolvedRep.code || resolvedRep.id}) — ${statusMessage} at ${time12} (${attendanceDate})`
+      );
+
+      return {
+        success: true,
+        duplicateBlocked: false,
+        action,
+        statusLabel: (action === 'IN' ? 'IN' : 'OUT') as 'IN' | 'OUT',
+        statusMessage,
+        date: attendanceDate,
+        recordedTime24: scanTime24,
+        recordedTime12: time12,
+        inTime: nextRecord.inTime || nextRecord.checkInTime,
+        outTime: nextRecord.outTime || nextRecord.checkOutTime,
+        employee: {
+          id: resolvedRep.id,
+          code: resolvedRep.code,
+          name: resolvedRep.name,
+          department: resolvedRep.department,
+          designation: resolvedRep.designation,
+          employeeCategory: resolvedRep.employeeCategory,
+        },
+        record: nextRecord,
+        dbSynced: true,
+      };
+    };
+
     const sendScan = async () => {
       return fetch('/api/attendance/qr-scan', {
         method: 'POST',
@@ -21218,7 +21533,16 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resp = await sendScan();
       }
 
-      const data = await resp.json().catch(() => ({}));
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+      const rawText = await resp.text();
+      const parsed = tryParseJsonSafe(rawText);
+
+      // On static SPA hosting (e.g. Firebase Hosting rewrite returning index.html), fall back cleanly
+      if (!contentType.includes('application/json') || !parsed.ok) {
+        return await runClientQrFallback();
+      }
+
+      const data = parsed.data;
       if (!resp.ok || !data?.success) {
         return {
           success: false,
@@ -21233,25 +21557,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       const scannedRecord = data.record as AttendanceRecord | undefined;
-      let finalDbSynced = Boolean(data.dbSynced);
+      const finalDbSynced = Boolean(data.dbSynced);
       if (scannedRecord) {
-        setAttendanceRecords((prev) => {
-          const filtered = prev.filter(
-            (a) =>
-              !(
-                (a.employeeId === scannedRecord.employeeId ||
-                  a.fieldForceId === scannedRecord.employeeId) &&
-                a.date === scannedRecord.date
-              )
-          );
-          const nextSnapshot = [scannedRecord, ...filtered];
-          if (!data.dbSynced) {
-            void persistAttendanceRecordsToSupabase([scannedRecord], nextSnapshot);
-          } else {
-            setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
-          }
-          return nextSnapshot;
-        });
+        applyScannedRecordToState(scannedRecord, finalDbSynced);
       }
 
       if (data?.employee?.name) {
@@ -21277,13 +21585,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         record: scannedRecord,
         dbSynced: finalDbSynced,
       };
-    } catch (err: any) {
-      return {
-        success: false,
-        duplicateBlocked: false,
-        errorCode: 'NETWORK_ERROR',
-        error: err?.message || 'Network error while recording QR attendance.',
-      };
+    } catch {
+      return await runClientQrFallback();
     }
   };
 
