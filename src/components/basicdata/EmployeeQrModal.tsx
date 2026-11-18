@@ -147,7 +147,7 @@ export const EmployeeQrSingleModal: React.FC<SingleQrModalProps> = ({
                   {employee.name}
                 </h4>
                 <p className="text-xs font-semibold text-slate-500 mt-0.5">
-                  {[employee.designation, employee.department].filter(Boolean).join(' • ') || 'Staff'}
+                  {employee.designation || 'Staff'}
                 </p>
                 <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 font-mono font-bold text-xs">
                   <span>ID: {employee.code || employee.id}</span>
@@ -545,9 +545,6 @@ export const EmployeeQrBulkModal: React.FC<BulkQrModalProps> = ({ isOpen, onClos
                           </div>
                           <div className="text-[11px] text-slate-600 font-medium truncate mt-1">
                             {emp.designation || 'Staff'}
-                          </div>
-                          <div className="text-[10px] text-slate-500 truncate">
-                            {emp.department || emp.employeeCategory || 'Operations'}
                           </div>
                         </div>
                       </div>

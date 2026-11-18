@@ -180,8 +180,8 @@ export async function renderEmployeeQrBadgePngBlob(
 
   ctx.fillStyle = '#475569';
   ctx.font = '600 20px system-ui, -apple-system, sans-serif';
-  const roleDept = [employee.designation, employee.department].filter(Boolean).join(' • ') || 'Staff';
-  ctx.fillText(truncateText(ctx, roleDept, 560), width / 2, 242);
+  const roleLabel = employee.designation || 'Staff';
+  ctx.fillText(truncateText(ctx, roleLabel, 560), width / 2, 242);
 
   // Employee ID Pill Box
   const codeText = `ID: ${employee.code || employee.id}`;
