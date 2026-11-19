@@ -511,6 +511,13 @@ interface ERPContextType {
     rackLocation?: string;
   }) => Promise<{ success: boolean; receiptId?: string; error?: string }>;
   updateBOMDefinition: (bom: BOMDefinition) => Promise<{ success: boolean; error?: string }>;
+  deleteBOMDefinition: (params: {
+    bomId?: string;
+    productId: string;
+    productCode?: string;
+    productModel?: string;
+    productName?: string;
+  }) => Promise<{ success: boolean; error?: string }>;
   refreshBOMs?: () => Promise<void>;
   getFifoBatchesForMaterial: (materialId: string, warehouseId?: string) => InventoryBatch[];
   findBatchByBarcode: (barcodeOrBatchNo: string) => InventoryBatch | undefined;
@@ -13343,6 +13350,142 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const deleteBOMDefinition = async (params: {
+    bomId?: string;
+    productId: string;
+    productCode?: string;
+    productModel?: string;
+    productName?: string;
+  }): Promise<{ success: boolean; error?: string }> => {
+    const canDeleteBom =
+      currentUser?.role === 'Super Admin' ||
+      hasPageAction(currentUser, 'manufacturing', 'update_bom') ||
+      !currentUser?.permissions?.pagePermissions?.manufacturing;
+
+    if (!canDeleteBom) {
+      addAuditLog(
+        'PERMISSION_DENIED',
+        'Bill of Materials',
+        `${currentUser?.name || 'User'} attempted to delete BOM for ${params.productName || params.productId} without update_bom permission`
+      );
+      return {
+        success: false,
+        error: 'Permission denied: Update BOM Definition permission is required to delete a BOM.',
+      };
+    }
+
+    const matchBom = (b: BOMDefinition) =>
+      (params.bomId && b.id === params.bomId) ||
+      b.productId === params.productId ||
+      (params.productCode && b.productCode === params.productCode) ||
+      (params.productModel && b.productModel === params.productModel);
+
+    const matchProduct = (p: Product) =>
+      p.id === params.productId ||
+      (params.productCode && p.code === params.productCode) ||
+      (params.productModel && p.model === params.productModel);
+
+    const targetProd = products.find(matchProduct);
+    const label = params.productName || targetProd?.name || params.productCode || params.productId;
+
+    setBoms((prev) => {
+      const updated = prev.filter((b) => !matchBom(b));
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('ensec_boms', JSON.stringify(updated));
+        } catch {}
+      }
+      return updated;
+    });
+
+    setProducts((prev) => {
+      const updated = prev.map((p) => (matchProduct(p) ? { ...p, bom: [] } : p));
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('ensec_products', JSON.stringify(updated));
+        } catch {}
+      }
+      return updated;
+    });
+
+    addAuditLog('BOM_DELETED', 'Bill of Materials', `Deleted BOM specification for ${label}`);
+
+    const sb = getSupabase();
+    if (!sb) {
+      return { success: true };
+    }
+
+    try {
+      // 1. Clear bom JSONB on products table
+      if (targetProd) {
+        const isNumericProd = /^\d+$/.test(targetProd.id);
+        const prodQuery = isNumericProd
+          ? sb
+              .from('products')
+              .update({ bom: [], updated_at: new Date().toISOString() })
+              .eq('id', Number(targetProd.id))
+          : sb
+              .from('products')
+              .update({ bom: [], updated_at: new Date().toISOString() })
+              .eq('code', targetProd.code);
+        await prodQuery;
+      }
+
+      // 2. Resolve matching bill_of_materials row IDs
+      const matchedBomDbIds = new Set<number>();
+      if (params.bomId && /^\d+$/.test(String(params.bomId))) {
+        matchedBomDbIds.add(Number(params.bomId));
+      }
+
+      let dbProductId: number | null = /^\d+$/.test(params.productId) ? Number(params.productId) : null;
+      if (!dbProductId && targetProd && /^\d+$/.test(targetProd.id)) {
+        dbProductId = Number(targetProd.id);
+      }
+      const resolvedCode = targetProd?.code || params.productCode;
+      if (!dbProductId && resolvedCode) {
+        const { data: pData } = await sb.from('products').select('id').eq('code', resolvedCode).limit(1);
+        if (pData?.[0]?.id) {
+          dbProductId = Number(pData[0].id);
+        }
+      }
+
+      if (dbProductId) {
+        const { data: rowsByProd } = await sb
+          .from('bill_of_materials')
+          .select('id')
+          .eq('product_id', dbProductId);
+        (rowsByProd || []).forEach((r: any) => {
+          if (r?.id !== undefined && r?.id !== null) matchedBomDbIds.add(Number(r.id));
+        });
+      }
+
+      if (resolvedCode) {
+        const { data: rowsByCode } = await sb
+          .from('bill_of_materials')
+          .select('id')
+          .eq('product_code', resolvedCode);
+        (rowsByCode || []).forEach((r: any) => {
+          if (r?.id !== undefined && r?.id !== null) matchedBomDbIds.add(Number(r.id));
+        });
+      }
+
+      const bomIdList = Array.from(matchedBomDbIds).filter((id) => Number.isFinite(id));
+      if (bomIdList.length > 0) {
+        await sb.from('bom_items').delete().in('bom_id', bomIdList);
+        const { error: delBomErr } = await sb.from('bill_of_materials').delete().in('id', bomIdList);
+        if (delBomErr) {
+          console.warn('deleteBOMDefinition bill_of_materials delete warning:', delBomErr.message);
+          return { success: false, error: delBomErr.message };
+        }
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      console.error('Error deleting BOM from Supabase:', err);
+      return { success: false, error: err?.message || 'Failed to delete BOM from database' };
+    }
+  };
+
   const refreshBOMs = async () => {
     const sb = getSupabase();
     if (!sb) return;
@@ -24274,6 +24417,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setPendingFgReceiveOrderId,
         confirmFinishedGoodsReceive,
         updateBOMDefinition,
+        deleteBOMDefinition,
         refreshBOMs,
         getFifoBatchesForMaterial,
         findBatchByBarcode,

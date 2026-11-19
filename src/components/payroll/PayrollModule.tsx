@@ -6,7 +6,7 @@
  * Complete 13-Section Architecture with Double-Entry Accounting Integration
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   DollarSign,
   Plus,
@@ -380,6 +380,9 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
 
   // Form state for Leave Application
   const [leaveEmployeeId, setLeaveEmployeeId] = useState<string>('');
+  const [leaveEmployeeDropdownOpen, setLeaveEmployeeDropdownOpen] = useState<boolean>(false);
+  const [leaveEmployeeSearch, setLeaveEmployeeSearch] = useState<string>('');
+  const leaveEmployeeDropdownRef = useRef<HTMLDivElement | null>(null);
   const [leaveType, setLeaveType] = useState<LeaveType>('Casual Leave');
   const [leaveStartDate, setLeaveStartDate] = useState<string>(todayIso);
   const [leaveEndDate, setLeaveEndDate] = useState<string>(todayIso);
@@ -389,6 +392,29 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     type: 'success' | 'warning' | 'error';
     message: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (!leaveEmployeeDropdownOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        leaveEmployeeDropdownRef.current &&
+        !leaveEmployeeDropdownRef.current.contains(event.target as Node)
+      ) {
+        setLeaveEmployeeDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setLeaveEmployeeDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [leaveEmployeeDropdownOpen]);
 
   // Form state for Advance / Loan
   const [loanEmployeeId, setLoanEmployeeId] = useState<string>('');
@@ -2874,6 +2900,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 type="button"
                 onClick={() => {
                   setLeaveEmployeeId(fieldForceReps[0]?.id || '');
+                  setLeaveEmployeeSearch('');
+                  setLeaveEmployeeDropdownOpen(false);
                   setLeaveType('Casual Leave');
                   setLeaveStartDate(todayIso);
                   setLeaveEndDate(todayIso);
@@ -4735,24 +4763,145 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                   </div>
                 )}
 
-                <div>
+                <div ref={leaveEmployeeDropdownRef} className="relative">
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                     Select Employee*
                   </label>
-                  <select
-                    value={leaveEmployeeId}
-                    onChange={(e) => {
-                      setLeaveEmployeeId(e.target.value);
-                      setLeaveFormError('');
-                    }}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"
-                  >
-                    {fieldForceReps.map((emp) => (
-                      <option key={emp.id} value={emp.id}>
-                        {emp.name} ({emp.code} • {emp.designation})
-                      </option>
-                    ))}
-                  </select>
+                  {(() => {
+                    const selectedEmp =
+                      fieldForceReps.find((r) => r.id === leaveEmployeeId) || fieldForceReps[0];
+                    const q = leaveEmployeeSearch.trim().toLowerCase();
+                    const filteredEmployees = !q
+                      ? fieldForceReps
+                      : fieldForceReps.filter((emp) => {
+                          const name = (emp.name || '').toLowerCase();
+                          const code = (emp.code || '').toLowerCase();
+                          const desig = (emp.designation || '').toLowerCase();
+                          const dept = (emp.department || '').toLowerCase();
+                          const phone = (emp.mobileNumber || '').toLowerCase();
+                          return (
+                            name.includes(q) ||
+                            code.includes(q) ||
+                            desig.includes(q) ||
+                            dept.includes(q) ||
+                            phone.includes(q)
+                          );
+                        });
+
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          aria-haspopup="listbox"
+                          aria-expanded={leaveEmployeeDropdownOpen}
+                          onClick={() => {
+                            setLeaveEmployeeDropdownOpen((open) => !open);
+                            if (!leaveEmployeeDropdownOpen) {
+                              setLeaveEmployeeSearch('');
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-left flex items-center justify-between gap-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+                        >
+                          <div className="min-w-0 truncate">
+                            {selectedEmp ? (
+                              <span className="font-semibold text-slate-900 dark:text-white">
+                                {selectedEmp.name}{' '}
+                                <span className="text-slate-500 dark:text-slate-400 font-normal">
+                                  ({selectedEmp.code} • {selectedEmp.designation})
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">Select an employee...</span>
+                            )}
+                          </div>
+                          <ChevronDown
+                            className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${
+                              leaveEmployeeDropdownOpen ? 'rotate-180' : ''
+                            }`}
+                          />
+                        </button>
+
+                        {leaveEmployeeDropdownOpen && (
+                          <div className="absolute left-0 right-0 mt-1.5 z-30 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl overflow-hidden">
+                            <div className="p-2 border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60">
+                              <div className="relative">
+                                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2 pointer-events-none" />
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  aria-label="Search employee"
+                                  value={leaveEmployeeSearch}
+                                  onChange={(e) => setLeaveEmployeeSearch(e.target.value)}
+                                  placeholder="Search name, ID, dept, or designation..."
+                                  className="w-full pl-8 pr-7 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+                                />
+                                {leaveEmployeeSearch && (
+                                  <button
+                                    type="button"
+                                    aria-label="Clear search"
+                                    onClick={() => setLeaveEmployeeSearch('')}
+                                    className="absolute right-2 top-1.5 p-0.5 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            <div
+                              role="listbox"
+                              className="max-h-52 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/70"
+                            >
+                              {filteredEmployees.length === 0 ? (
+                                <div className="px-3 py-4 text-center text-slate-500 dark:text-slate-400">
+                                  No employees matching &ldquo;{leaveEmployeeSearch.trim()}&rdquo;.
+                                </div>
+                              ) : (
+                                filteredEmployees.map((emp) => {
+                                  const isSelected = emp.id === selectedEmp?.id;
+                                  return (
+                                    <button
+                                      key={emp.id}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={isSelected}
+                                      onClick={() => {
+                                        setLeaveEmployeeId(emp.id);
+                                        setLeaveEmployeeDropdownOpen(false);
+                                        setLeaveEmployeeSearch('');
+                                        setLeaveFormError('');
+                                      }}
+                                      className={`w-full px-3 py-2 text-left flex items-center justify-between gap-2 transition-colors ${
+                                        isSelected
+                                          ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-900 dark:text-blue-100'
+                                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/70 text-slate-800 dark:text-slate-200'
+                                      }`}
+                                    >
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="font-bold truncate">{emp.name}</span>
+                                          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400 font-semibold shrink-0">
+                                            {emp.code}
+                                          </span>
+                                        </div>
+                                        <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                                          {emp.designation}
+                                          {emp.department ? ` • ${emp.department}` : ''}
+                                        </div>
+                                      </div>
+                                      {isSelected && (
+                                        <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                                      )}
+                                    </button>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {(() => {

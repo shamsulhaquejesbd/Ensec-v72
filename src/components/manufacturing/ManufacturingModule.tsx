@@ -23,6 +23,7 @@ import {
   RotateCw,
   Archive,
   Lock,
+  Trash2,
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
 import { Product, ProductionOrder, BOMItem, ProductionCostRecord } from '../../types/erp.ts';
@@ -69,6 +70,7 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
     completeProductionOrder,
     cancelProductionOrder,
     updateProductBOM,
+    deleteBOMDefinition,
     receiveFinishedGoodsFromProduction,
     setPendingFgReceiveOrderId,
     materialIssues,
@@ -96,6 +98,10 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
   );
   const canViewBomExportBtn = canViewBomExport(currentUser);
   const canViewBomUploadBtn = canViewBomUpload(currentUser);
+  const canEditOrDeleteBom =
+    currentUser?.role === 'Super Admin' ||
+    hasPageAction(currentUser, 'manufacturing', 'update_bom') ||
+    !currentUser?.permissions?.pagePermissions?.manufacturing;
   const canViewBomTab =
     canViewBomOrders ||
     hasPageAction(currentUser, 'manufacturing', 'update_bom') ||
@@ -145,6 +151,19 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
     productId?: string;
     version?: string;
   }>({ isOpen: false });
+  const [bomToDelete, setBomToDelete] = useState<{
+    bomId?: string;
+    product: Product;
+    version: string;
+    itemCount: number;
+    totalCost: number;
+  } | null>(null);
+  const [isDeletingBom, setIsDeletingBom] = useState(false);
+  const [bomDeleteError, setBomDeleteError] = useState<string | null>(null);
+  const [bomFeedback, setBomFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
 
@@ -948,6 +967,32 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
             </div>
           </div>
 
+          {bomFeedback && (
+            <div
+              className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+                bomFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                  : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {bomFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                )}
+                <span className="font-medium leading-relaxed">{bomFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBomFeedback(null)}
+                className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {products.map((prod) => {
               const bomDef = (boms || []).find(
@@ -1059,6 +1104,26 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
                       >
                         <Wrench className="w-3.5 h-3.5" />
                         <span>Configure BOM</span>
+                      </button>
+                    )}
+                    {canEditOrDeleteBom && (activeItems.length > 0 || Boolean(bomDef)) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBomDeleteError(null);
+                          setBomToDelete({
+                            bomId: bomDef?.id,
+                            product: prod,
+                            version: versionStr,
+                            itemCount: activeItems.length,
+                            totalCost: totalBOMCost,
+                          });
+                        }}
+                        className="p-2 rounded-xl text-xs font-semibold bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 hover:bg-rose-100 hover:text-rose-700 dark:hover:bg-rose-900/60 border border-rose-200 dark:border-rose-800/70 transition cursor-pointer shrink-0"
+                        title={`Delete BOM for ${prod.name}`}
+                        aria-label={`Delete BOM for ${prod.name}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
                   </div>
@@ -1307,6 +1372,111 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
           initialVersion={exportBOMState.version}
           onClose={() => setExportBOMState({ isOpen: false })}
         />
+      )}
+
+      {/* Modal: Confirm BOM Delete */}
+      {bomToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 text-xs">
+            <div className="flex items-start gap-3">
+              <div className="p-3 bg-red-100 dark:bg-red-950/80 text-red-600 dark:text-red-400 rounded-2xl shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Delete Bill of Materials (BOM)?
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  Are you sure you want to delete this BOM specification? This will remove all configured components and reset the product&apos;s active BOM.
+                </p>
+              </div>
+            </div>
+
+            {bomDeleteError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 font-medium">
+                {bomDeleteError}
+              </div>
+            )}
+
+            <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3.5 space-y-2 border border-slate-200 dark:border-slate-700 text-xs">
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Product:</span>
+                <span className="font-semibold text-slate-900 dark:text-white text-right">
+                  {bomToDelete.product.name} ({bomToDelete.product.code || 'FG-PROD'})
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Model:</span>
+                <span className="font-mono text-slate-700 dark:text-slate-300">
+                  {bomToDelete.product.model}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">BOM Version:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                  v{bomToDelete.version}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Configured Components:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                  {bomToDelete.itemCount} {bomToDelete.itemCount === 1 ? 'Material' : 'Materials'}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Est. Cost / Unit:</span>
+                <span className="font-mono font-bold text-blue-600 dark:text-blue-400">
+                  ৳ {bomToDelete.totalCost.toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingBom}
+                onClick={() => {
+                  setBomToDelete(null);
+                  setBomDeleteError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-750 transition cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingBom}
+                onClick={async () => {
+                  if (!bomToDelete || isDeletingBom) return;
+                  setIsDeletingBom(true);
+                  setBomDeleteError(null);
+                  const target = bomToDelete;
+                  const res = await deleteBOMDefinition({
+                    bomId: target.bomId,
+                    productId: target.product.id,
+                    productCode: target.product.code,
+                    productModel: target.product.model,
+                    productName: target.product.name,
+                  });
+                  setIsDeletingBom(false);
+                  if (!res.success) {
+                    setBomDeleteError(res.error || 'Failed to delete BOM specification.');
+                    return;
+                  }
+                  setBomToDelete(null);
+                  setBomFeedback({
+                    type: 'success',
+                    message: `BOM (v${target.version}) for ${target.product.name} deleted successfully.`,
+                  });
+                }}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-xs font-bold transition shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingBom ? 'Deleting...' : 'Confirm Delete'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
 
