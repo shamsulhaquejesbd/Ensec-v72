@@ -7188,6 +7188,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       refreshPayrollSettings(),
       refreshOfficeLocations(),
       refreshAttendanceData(),
+      refreshLeaveRecords(),
       refreshOvertimeData(),
       refreshOffers(),
       refreshSalesOrders(),
@@ -21746,6 +21747,106 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const refreshLeaveRecords = async () => {
+    const sb = getSupabase();
+    if (!sb) return;
+    try {
+      const [primaryRes, backupRes] = await Promise.all([
+        sb.from('employee_leaves').select('*').order('applied_at', { ascending: false }).limit(500),
+        sb
+          .from('system_settings')
+          .select('settings_json')
+          .eq('id', 'employee_leaves')
+          .maybeSingle(),
+      ]);
+
+      const mergedMap = new Map<string, LeaveRecord>();
+
+      const backupList = Array.isArray((backupRes.data?.settings_json as any)?.records)
+        ? ((backupRes.data!.settings_json as any).records as LeaveRecord[])
+        : [];
+      backupList.forEach((rec) => {
+        if (rec?.id) mergedMap.set(rec.id, rec);
+      });
+
+      if (!primaryRes.error && Array.isArray(primaryRes.data)) {
+        primaryRes.data.forEach((row: any) => {
+          if (!row?.id) return;
+          mergedMap.set(String(row.id), {
+            id: String(row.id),
+            employeeId: row.employee_id ? String(row.employee_id) : undefined,
+            fieldForceId: row.employee_id ? String(row.employee_id) : undefined,
+            employeeCode: row.employee_code ? String(row.employee_code) : undefined,
+            employeeName: String(row.employee_name || ''),
+            leaveType: (row.leave_type || 'Casual Leave') as LeaveRecord['leaveType'],
+            startDate: String(row.start_date || ''),
+            endDate: String(row.end_date || ''),
+            daysCount: Number(row.days_count) || 1,
+            totalDays: Number(row.days_count) || 1,
+            reason: String(row.reason || ''),
+            status: (row.status || 'Pending') as LeaveRecord['status'],
+            appliedAt: row.applied_at ? String(row.applied_at) : undefined,
+            approvedBy: row.approved_by ? String(row.approved_by) : undefined,
+            approvedAt: row.approved_at ? String(row.approved_at) : undefined,
+            rejectionReason: row.rejection_reason ? String(row.rejection_reason) : undefined,
+          });
+        });
+      }
+
+      if (mergedMap.size > 0) {
+        const list = Array.from(mergedMap.values()).sort((a, b) =>
+          (b.appliedAt || b.startDate || '').localeCompare(a.appliedAt || a.startDate || '')
+        );
+        setLeaveRecords(list);
+      }
+    } catch (err) {
+      console.warn('refreshLeaveRecords notice:', err);
+    }
+  };
+
+  const persistLeavesToSupabase = async (targetRecord: LeaveRecord, snapshotList: LeaveRecord[]) => {
+    const sb = getSupabase();
+    if (!sb) return;
+    try {
+      const { error } = await sb.from('employee_leaves').upsert(
+        {
+          id: targetRecord.id,
+          employee_id: targetRecord.employeeId || targetRecord.fieldForceId || '',
+          employee_code: targetRecord.employeeCode || '',
+          employee_name: targetRecord.employeeName,
+          leave_type: targetRecord.leaveType,
+          start_date: targetRecord.startDate,
+          end_date: targetRecord.endDate,
+          days_count: Number(targetRecord.daysCount ?? targetRecord.totalDays ?? 1) || 1,
+          reason: targetRecord.reason,
+          status: targetRecord.status,
+          applied_at: targetRecord.appliedAt || new Date().toISOString(),
+          approved_by: targetRecord.approvedBy || null,
+          approved_at: targetRecord.approvedAt || null,
+          rejection_reason: targetRecord.rejectionReason || null,
+        },
+        { onConflict: 'id' }
+      );
+
+      if (error) {
+        await sb.from('system_settings').upsert(
+          {
+            id: 'employee_leaves',
+            software_name: 'Employee Leaves',
+            logo_data_url: null,
+            branding_json: { type: 'employee_leaves' },
+            settings_json: { records: snapshotList.slice(0, 500) },
+            updated_by: currentUser?.name || 'Admin',
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'id' }
+        );
+      }
+    } catch (err) {
+      console.warn('persistLeavesToSupabase notice:', err);
+    }
+  };
+
   const applyLeave = (leave: Omit<LeaveRecord, 'id' | 'appliedAt' | 'status'>): string => {
     const canSubmitLeave =
       hasPageAction(currentUser, 'payroll', 'create_payroll') ||
@@ -21766,7 +21867,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       appliedAt: new Date().toISOString(),
       status: 'Pending',
     };
+    const nextList = [newLeave, ...leaveRecords];
     setLeaveRecords((prev) => [newLeave, ...prev]);
+    void persistLeavesToSupabase(newLeave, nextList);
     addAuditLog(
       'LEAVE_APPLIED',
       'HR & Payroll',
@@ -21781,9 +21884,21 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve leave (${id}) without approve_payroll permission`);
       return;
     }
+    const approvedAt = new Date().toISOString();
+    let updatedRecord: LeaveRecord | null = null;
+    const nextList = leaveRecords.map((l) => {
+      if (l.id === id) {
+        updatedRecord = { ...l, status: 'Approved', approvedBy, approvedAt };
+        return updatedRecord;
+      }
+      return l;
+    });
     setLeaveRecords((prev) =>
-      prev.map((l) => (l.id === id ? { ...l, status: 'Approved', approvedBy, approvedAt: new Date().toISOString() } : l))
+      prev.map((l) => (l.id === id ? { ...l, status: 'Approved', approvedBy, approvedAt } : l))
     );
+    if (updatedRecord) {
+      void persistLeavesToSupabase(updatedRecord, nextList);
+    }
     addAuditLog('LEAVE_APPROVED', 'HR & Payroll', `Approved leave ID ${id} by ${approvedBy}`);
   };
 
@@ -21793,9 +21908,20 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to reject leave (${id}) without approve_payroll permission`);
       return;
     }
+    let updatedRecord: LeaveRecord | null = null;
+    const nextList = leaveRecords.map((l) => {
+      if (l.id === id) {
+        updatedRecord = { ...l, status: 'Rejected', rejectionReason: reason };
+        return updatedRecord;
+      }
+      return l;
+    });
     setLeaveRecords((prev) =>
       prev.map((l) => (l.id === id ? { ...l, status: 'Rejected', rejectionReason: reason } : l))
     );
+    if (updatedRecord) {
+      void persistLeavesToSupabase(updatedRecord, nextList);
+    }
     addAuditLog('LEAVE_REJECTED', 'HR & Payroll', `Rejected leave ID ${id} (Reason: ${reason})`);
   };
 

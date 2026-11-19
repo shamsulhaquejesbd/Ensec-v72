@@ -384,6 +384,11 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   const [leaveStartDate, setLeaveStartDate] = useState<string>(todayIso);
   const [leaveEndDate, setLeaveEndDate] = useState<string>(todayIso);
   const [leaveReason, setLeaveReason] = useState<string>('');
+  const [leaveFormError, setLeaveFormError] = useState<string>('');
+  const [leaveFeedback, setLeaveFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+  } | null>(null);
 
   // Form state for Advance / Loan
   const [loanEmployeeId, setLoanEmployeeId] = useState<string>('');
@@ -2866,8 +2871,15 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
             </div>
             {canCreatePayroll && (
               <button
+                type="button"
                 onClick={() => {
                   setLeaveEmployeeId(fieldForceReps[0]?.id || '');
+                  setLeaveType('Casual Leave');
+                  setLeaveStartDate(todayIso);
+                  setLeaveEndDate(todayIso);
+                  setLeaveReason('');
+                  setLeaveFormError('');
+                  setLeaveFeedback(null);
                   setShowLeaveModal(true);
                 }}
                 className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs"
@@ -2877,6 +2889,34 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
               </button>
             )}
           </div>
+
+          {leaveFeedback && (
+            <div
+              className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+                leaveFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                  : leaveFeedback.type === 'warning'
+                  ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+                  : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {leaveFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                )}
+                <span className="font-medium leading-relaxed">{leaveFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLeaveFeedback(null)}
+                className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* Quota Highlights */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2973,13 +3013,27 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                             (canApprovePayroll ? (
                               <div className="inline-flex gap-1">
                                 <button
-                                  onClick={() => approveLeave(l.id, currentUser?.name || 'Managing Director')}
+                                  type="button"
+                                  onClick={() => {
+                                    approveLeave(l.id, currentUser?.name || 'Managing Director');
+                                    setLeaveFeedback({
+                                      type: 'success',
+                                      message: `Approved ${l.leaveType} for ${l.employeeName} (${l.daysCount} day${l.daysCount === 1 ? '' : 's'}).`,
+                                    });
+                                  }}
                                   className="px-2 py-1 rounded bg-emerald-600 text-white font-bold text-[10px] hover:bg-emerald-700"
                                 >
                                   Approve
                                 </button>
                                 <button
-                                  onClick={() => rejectLeave(l.id, 'Management operational constraint')}
+                                  type="button"
+                                  onClick={() => {
+                                    rejectLeave(l.id, 'Management operational constraint');
+                                    setLeaveFeedback({
+                                      type: 'warning',
+                                      message: `Rejected ${l.leaveType} application for ${l.employeeName}.`,
+                                    });
+                                  }}
                                   className="px-2 py-1 rounded bg-rose-600 text-white font-bold text-[10px] hover:bg-rose-700"
                                 >
                                   Reject
@@ -4582,6 +4636,261 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 Close Schedule
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: APPLY EMPLOYEE LEAVE                                               */}
+      {/* ========================================================================= */}
+      {canCreatePayroll && showLeaveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3 border-slate-100 dark:border-slate-800">
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                New Employee Leave Application
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowLeaveModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {fieldForceReps.length === 0 ? (
+              <div className="space-y-4 text-xs">
+                <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200">
+                  No employees found in the Employee Master. Please add at least one employee before applying for leave.
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaveModal(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setLeaveFormError('');
+                  const emp =
+                    fieldForceReps.find((r) => r.id === leaveEmployeeId) || fieldForceReps[0];
+                  if (!emp) {
+                    setLeaveFormError('Please select an employee.');
+                    return;
+                  }
+                  if (!leaveStartDate || !leaveEndDate) {
+                    setLeaveFormError('Please select both Start Date and End Date.');
+                    return;
+                  }
+                  const startMs = Date.parse(`${leaveStartDate}T00:00:00`);
+                  const endMs = Date.parse(`${leaveEndDate}T00:00:00`);
+                  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+                    setLeaveFormError('End Date cannot be earlier than Start Date.');
+                    return;
+                  }
+                  const daysCount = Math.floor((endMs - startMs) / 86400000) + 1;
+                  const trimmedReason = leaveReason.trim();
+                  if (!trimmedReason) {
+                    setLeaveFormError('Please enter a reason for the leave application.');
+                    return;
+                  }
+
+                  const createdId = applyLeave({
+                    employeeId: emp.id,
+                    fieldForceId: emp.id,
+                    employeeCode: emp.code || emp.id,
+                    employeeName: emp.name,
+                    department: emp.department || 'Operations',
+                    leaveType,
+                    startDate: leaveStartDate,
+                    endDate: leaveEndDate,
+                    daysCount,
+                    totalDays: daysCount,
+                    reason: trimmedReason,
+                  });
+
+                  if (!createdId) {
+                    setLeaveFormError('Permission denied or unable to submit leave application.');
+                    return;
+                  }
+
+                  setShowLeaveModal(false);
+                  setLeaveFeedback({
+                    type: 'success',
+                    message: `Leave application submitted for ${emp.name} (${leaveType}, ${daysCount} day${daysCount === 1 ? '' : 's'}).`,
+                  });
+                }}
+                className="space-y-3 text-xs"
+              >
+                {leaveFormError && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 font-medium">
+                    {leaveFormError}
+                  </div>
+                )}
+
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Select Employee*
+                  </label>
+                  <select
+                    value={leaveEmployeeId}
+                    onChange={(e) => {
+                      setLeaveEmployeeId(e.target.value);
+                      setLeaveFormError('');
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  >
+                    {fieldForceReps.map((emp) => (
+                      <option key={emp.id} value={emp.id}>
+                        {emp.name} ({emp.code} • {emp.designation})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {(() => {
+                  const targetEmpId = leaveEmployeeId || fieldForceReps[0]?.id;
+                  const yr = Number((leaveStartDate || todayIso).slice(0, 4)) || new Date().getFullYear();
+                  const bal = targetEmpId ? getEmployeeLeaveBalance(targetEmpId, yr) : null;
+                  if (!bal) return null;
+                  return (
+                    <div className="grid grid-cols-3 gap-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-[10px]">
+                      <div>
+                        <span className="text-slate-400 block uppercase font-bold">Annual Bal</span>
+                        <span className="font-bold text-blue-600 dark:text-blue-400">
+                          {bal.annual.remaining} / {bal.annual.quota}d
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block uppercase font-bold">Casual Bal</span>
+                        <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                          {bal.casual.remaining} / {bal.casual.quota}d
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block uppercase font-bold">Sick Bal</span>
+                        <span className="font-bold text-amber-600 dark:text-amber-400">
+                          {bal.sick.remaining} / {bal.sick.quota}d
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Leave Type*
+                  </label>
+                  <select
+                    value={leaveType}
+                    onChange={(e) => setLeaveType(e.target.value as LeaveType)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  >
+                    <option value="Casual Leave">Casual Leave</option>
+                    <option value="Annual Leave">Annual Leave</option>
+                    <option value="Sick Leave">Sick Leave</option>
+                    <option value="Maternity Leave">Maternity Leave</option>
+                    <option value="Unpaid Leave">Unpaid Leave</option>
+                    <option value="Other Leave">Other Leave</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Start Date*
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={leaveStartDate}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setLeaveStartDate(val);
+                        if (val && leaveEndDate && leaveEndDate < val) {
+                          setLeaveEndDate(val);
+                        }
+                        setLeaveFormError('');
+                      }}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      End Date*
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      min={leaveStartDate || undefined}
+                      value={leaveEndDate}
+                      onChange={(e) => {
+                        setLeaveEndDate(e.target.value);
+                        setLeaveFormError('');
+                      }}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono"
+                    />
+                  </div>
+                </div>
+
+                {(() => {
+                  const sMs = leaveStartDate ? Date.parse(`${leaveStartDate}T00:00:00`) : NaN;
+                  const eMs = leaveEndDate ? Date.parse(`${leaveEndDate}T00:00:00`) : NaN;
+                  const days =
+                    Number.isFinite(sMs) && Number.isFinite(eMs) && eMs >= sMs
+                      ? Math.floor((eMs - sMs) / 86400000) + 1
+                      : 0;
+                  return (
+                    <div className="p-2.5 bg-blue-50 dark:bg-blue-950/40 rounded-xl text-blue-800 dark:text-blue-200 flex items-center justify-between">
+                      <span className="font-bold">Calculated Duration:</span>
+                      <span className="font-mono text-sm font-black">
+                        {days} {days === 1 ? 'Day' : 'Days'}
+                      </span>
+                    </div>
+                  );
+                })()}
+
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Reason / Remarks*
+                  </label>
+                  <textarea
+                    rows={3}
+                    required
+                    placeholder="Enter reason for leave..."
+                    value={leaveReason}
+                    onChange={(e) => {
+                      setLeaveReason(e.target.value);
+                      setLeaveFormError('');
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaveModal(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs"
+                  >
+                    Submit Leave Application
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
