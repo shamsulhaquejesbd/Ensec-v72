@@ -282,7 +282,9 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     standardWorkingDaysPerMonth: String(payrollSettings?.standardWorkingDaysPerMonth ?? 26),
     standardDailyHours: String(payrollSettings?.standardDailyHours ?? 8),
     pfEmployeeContributionPercent: String(
-      payrollSettings?.deductionRules?.pfEmployeeContributionPercent ?? 10
+      payrollSettings?.pfEmployeeContributionPercent ??
+        payrollSettings?.deductionRules?.pfEmployeeContributionPercent ??
+        10
     ),
     shiftStartTime: payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
     shiftEndTime: payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
@@ -300,7 +302,9 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       standardWorkingDaysPerMonth: String(payrollSettings?.standardWorkingDaysPerMonth ?? 26),
       standardDailyHours: String(payrollSettings?.standardDailyHours ?? 8),
       pfEmployeeContributionPercent: String(
-        payrollSettings?.deductionRules?.pfEmployeeContributionPercent ?? 10
+        payrollSettings?.pfEmployeeContributionPercent ??
+          payrollSettings?.deductionRules?.pfEmployeeContributionPercent ??
+          10
       ),
       shiftStartTime: payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
       shiftEndTime: payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
@@ -3868,60 +3872,11 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                   </p>
                 )}
               </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                {payrollSettingsDbStatus.synced ? (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-bold">
-                    <Database className="w-3 h-3" />
-                    Supabase Synced
-                  </span>
-                ) : payrollSettingsDbStatus.status !== 'unknown' ? (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/70 text-[10px] font-bold">
-                    <Database className="w-3 h-3" />
-                    {payrollSettingsDbStatus.status === 'rls_blocked'
-                      ? 'Supabase RLS Blocked'
-                      : payrollSettingsDbStatus.status === 'table_missing'
-                      ? 'Supabase Table Missing'
-                      : 'Supabase Sync Needed'}
-                  </span>
-                ) : null}
-
-                {canConfigurePayrollRules && (
-                  <button
-                    type="button"
-                    disabled={isSyncingPayrollSettings}
-                    onClick={async () => {
-                      setIsSyncingPayrollSettings(true);
-                      setSettingsFeedback(null);
-                      const res = await syncPayrollSettingsToSupabase();
-                      setIsSyncingPayrollSettings(false);
-                      if (res.success && res.dbSynced) {
-                        setSettingsFeedback({
-                          type: 'success',
-                          message: 'Corporate payroll rules verified & synced with Supabase.',
-                        });
-                      } else {
-                        setSettingsFeedback({
-                          type: 'warning',
-                          message:
-                            res.error ||
-                            'Could not sync payroll rules to Supabase. Run the SQL policy below in Supabase SQL Editor.',
-                          sqlFix: res.sqlFix || PAYROLL_SETTINGS_TABLE_SQL,
-                        });
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isSyncingPayrollSettings ? 'animate-spin' : ''}`} />
-                    <span>{isSyncingPayrollSettings ? 'Syncing...' : 'Sync to Supabase'}</span>
-                  </button>
-                )}
-              </div>
             </div>
 
             {settingsFeedback && (
               <div
-                className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+                className={`p-3 rounded-xl border text-xs space-y-2.5 ${
                   settingsFeedback.type === 'success'
                     ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
                     : settingsFeedback.type === 'warning'
@@ -3929,61 +3884,36 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                     : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
                 }`}
               >
-                <div className="flex items-start gap-2">
-                  {settingsFeedback.type === 'success' ? (
-                    <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
-                  )}
-                  <span className="font-medium leading-relaxed">{settingsFeedback.message}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setSettingsFeedback(null)}
-                  className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-
-            {canConfigurePayrollRules &&
-              !payrollSettingsDbStatus.synced &&
-              (payrollSettingsDbStatus.status === 'rls_blocked' ||
-                payrollSettingsDbStatus.status === 'table_missing' ||
-                payrollSettingsDbStatus.status === 'error' ||
-                Boolean(settingsFeedback?.sqlFix)) && (
-                <div className="p-4 rounded-2xl bg-amber-50/90 dark:bg-amber-950/35 border border-amber-200 dark:border-amber-800/80 space-y-3">
-                  <div className="flex items-start gap-2.5">
-                    <Database className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
-                    <div>
-                      <div className="text-xs font-bold text-amber-900 dark:text-amber-200">
-                        Supabase Permission / Table Setup Needed for Payroll Settings
-                      </div>
-                      <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5 leading-relaxed">
-                        {payrollSettingsDbStatus.error ||
-                          settingsFeedback?.message ||
-                          'Supabase blocked writing to public.payroll_settings.'}{' '}
-                        Run the SQL script below once in Supabase SQL Editor, then click{' '}
-                        <b>Sync to Supabase</b>.
-                      </p>
-                    </div>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2">
+                    {settingsFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                    )}
+                    <span className="font-medium leading-relaxed">{settingsFeedback.message}</span>
                   </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsFeedback(null)}
+                    className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {settingsFeedback.sqlFix && (
+                  <div className="space-y-2 pt-1 border-t border-amber-200/70 dark:border-amber-800/60">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
-                        One-Time Supabase SQL Fix (RLS Policy + Columns)
+                        Supabase SQL Fix (Run Once in SQL Editor)
                       </span>
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
                           onClick={async () => {
                             try {
-                              await navigator.clipboard.writeText(
-                                payrollSettingsDbStatus.sqlFix ||
-                                  settingsFeedback?.sqlFix ||
-                                  PAYROLL_SETTINGS_TABLE_SQL
-                              );
+                              await navigator.clipboard.writeText(settingsFeedback.sqlFix || PAYROLL_SETTINGS_TABLE_SQL);
                               setCopiedSettingsSql(true);
                               setTimeout(() => setCopiedSettingsSql(false), 2500);
                             } catch {}
@@ -4014,13 +3944,14 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                       </div>
                     </div>
                     <pre className="p-3 rounded-lg bg-slate-900 text-slate-100 text-[10px] font-mono overflow-x-auto max-h-40 leading-relaxed border border-slate-800">
-                      {payrollSettingsDbStatus.sqlFix ||
-                        settingsFeedback?.sqlFix ||
-                        PAYROLL_SETTINGS_TABLE_SQL}
+                      {settingsFeedback.sqlFix}
                     </pre>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+            )}
+
+            
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs pt-2">
               <div>
@@ -4255,6 +4186,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                     const result = await updatePayrollSettings({
                       standardWorkingDaysPerMonth: workingDays,
                       standardDailyHours: dailyHours,
+                      pfEmployeeContributionPercent: pfPercent,
                       deductionRules: {
                         ...(payrollSettings?.deductionRules || {}),
                         pfEmployeeContributionPercent: pfPercent,

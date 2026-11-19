@@ -4608,6 +4608,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       baseOvertime.hourlyRateMultiplier ??
       1.5;
 
+    const nextPfPercent =
+      partial.pfEmployeeContributionPercent ??
+      partial.deductionRules?.pfEmployeeContributionPercent ??
+      prev.pfEmployeeContributionPercent ??
+      prev.deductionRules?.pfEmployeeContributionPercent ??
+      10;
+
     return {
       ...prev,
       ...partial,
@@ -4616,6 +4623,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       standardWorkHoursPerDay: nextDailyHours,
       standardDailyHours: nextDailyHours,
       overtimeHourlyMultiplier: nextMultiplier,
+      pfEmployeeContributionPercent: nextPfPercent,
       shiftStartTime: partial.shiftStartTime ?? prev.shiftStartTime ?? DEFAULT_SHIFT_START_TIME,
       shiftEndTime: partial.shiftEndTime ?? prev.shiftEndTime ?? DEFAULT_SHIFT_END_TIME,
       lateGracePeriodMinutes:
@@ -4634,6 +4642,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deductionRules: {
         ...(prev?.deductionRules || DEFAULT_PAYROLL_SETTINGS.deductionRules || {}),
         ...(partial.deductionRules || {}),
+        pfEmployeeContributionPercent: nextPfPercent,
       },
       salaryComponents: {
         ...(prev?.salaryComponents || DEFAULT_PAYROLL_SETTINGS.salaryComponents || {}),
@@ -4653,6 +4662,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       lateGracePeriodMinutes: jsonGrace,
       maxGpsAccuracyMeters: jsonMaxGps,
       lateDaysForOneDayAbsent: jsonLateDays,
+      overtimeConfig: jsonOvertimeConfig,
       companyName: jsonCompanyName,
       companyAddress: jsonCompanyAddress,
       defaultBankAccountId: jsonDefaultBankId,
@@ -4661,11 +4671,29 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...cleanDeductionRules
     } = rawDeductionObj as Record<string, any>;
 
+    const hasColumnPf =
+      data?.pf_employee_contribution_percent !== null &&
+      data?.pf_employee_contribution_percent !== undefined &&
+      data?.pf_employee_contribution_percent !== '' &&
+      Number.isFinite(Number(data.pf_employee_contribution_percent));
+    const hasJsonPf =
+      cleanDeductionRules.pfEmployeeContributionPercent !== null &&
+      cleanDeductionRules.pfEmployeeContributionPercent !== undefined &&
+      cleanDeductionRules.pfEmployeeContributionPercent !== '' &&
+      Number.isFinite(Number(cleanDeductionRules.pfEmployeeContributionPercent));
+    const resolvedPfPercent = hasColumnPf
+      ? Math.min(100, Math.max(0, Number(data.pf_employee_contribution_percent)))
+      : hasJsonPf
+      ? Math.min(100, Math.max(0, Number(cleanDeductionRules.pfEmployeeContributionPercent)))
+      : 10;
+
     const remoteWorkingDays = Number(data?.standard_working_days_per_month) || 26;
     const remoteDailyHours = Number(data?.standard_daily_hours) || 8;
     const remoteOvertime =
       data?.overtime_config && typeof data.overtime_config === 'object'
         ? data.overtime_config
+        : jsonOvertimeConfig && typeof jsonOvertimeConfig === 'object'
+        ? jsonOvertimeConfig
         : {};
     const remoteLeaves =
       data?.leave_quotas && typeof data.leave_quotas === 'object' ? data.leave_quotas : {};
@@ -4679,6 +4707,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       workingDaysPerMonth: remoteWorkingDays,
       standardDailyHours: remoteDailyHours,
       standardWorkHoursPerDay: remoteDailyHours,
+      pfEmployeeContributionPercent: resolvedPfPercent,
       overtimeConfig: {
         hourlyRateMultiplier: Number(remoteOvertime.hourlyRateMultiplier) || 1.5,
       },
@@ -4688,7 +4717,10 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sickLeave: Number(remoteLeaves.sickLeave ?? 14),
         maternityLeave: Number(remoteLeaves.maternityLeave ?? 112),
       },
-      deductionRules: cleanDeductionRules,
+      deductionRules: {
+        ...cleanDeductionRules,
+        pfEmployeeContributionPercent: resolvedPfPercent,
+      },
       salaryComponents: remoteSalaryComp,
       shiftStartTime: data?.shift_start_time || jsonShiftStart || DEFAULT_SHIFT_START_TIME,
       shiftEndTime: data?.shift_end_time || jsonShiftEnd || DEFAULT_SHIFT_END_TIME,
@@ -4788,6 +4820,44 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (primaryRes.error) {
         setPayrollSettingsDbStatus(classifyPayrollSettingsSupabaseError(primaryRes.error));
+        return;
+      }
+
+      // Verify required columns exist on public.payroll_settings
+      const expectedColumns = [
+        'overtime_config',
+        'pf_employee_contribution_percent',
+        'shift_start_time',
+        'shift_end_time',
+        'late_grace_period_minutes',
+        'max_gps_accuracy_meters',
+        'updated_by',
+      ];
+      let missingColumns: string[] = [];
+      if (primaryRow) {
+        missingColumns = expectedColumns.filter(
+          (col) => !Object.prototype.hasOwnProperty.call(primaryRow, col)
+        );
+      } else {
+        const colProbe = await sb
+          .from('payroll_settings')
+          .select(expectedColumns.join(', '))
+          .limit(1);
+        if (colProbe.error) {
+          const msg = String(colProbe.error.message || '');
+          const match =
+            msg.match(/Could not find the '([^']+)' column/i)?.[1] ||
+            msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?"?([a-zA-Z0-9_]+)"?/i)?.[1];
+          missingColumns = match ? [match] : ['pf_employee_contribution_percent'];
+        }
+      }
+      if (missingColumns.length > 0) {
+        setPayrollSettingsDbStatus({
+          synced: false,
+          status: 'column_missing',
+          error: `Supabase table "public.payroll_settings" is missing column(s): ${missingColumns.join(', ')}.`,
+          sqlFix: PAYROLL_SETTINGS_TABLE_SQL,
+        });
         return;
       }
 
@@ -23185,7 +23255,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       let pfDeduction = 0;
       if (payrollSettings?.deductionRules?.providentFundEnabled) {
-        pfDeduction = Math.round((basic * (payrollSettings?.deductionRules?.pfEmployeeContributionPercent || 10)) / 100);
+        const pfRate =
+          payrollSettings?.pfEmployeeContributionPercent ??
+          payrollSettings?.deductionRules?.pfEmployeeContributionPercent ??
+          10;
+        pfDeduction = Math.round((basic * pfRate) / 100);
       }
 
       const totalDeductions = attendanceDeduction + loanDeduction + taxDeduction + pfDeduction;
@@ -23533,6 +23607,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const actorName = settings.updatedBy || currentUser?.name || 'Admin';
     const updatedAt = settings.updatedAt || new Date().toISOString();
+    const rawPf =
+      settings.pfEmployeeContributionPercent ??
+      settings.deductionRules?.pfEmployeeContributionPercent;
+    const pfPercent =
+      rawPf !== undefined && rawPf !== null && Number.isFinite(Number(rawPf))
+        ? Math.min(100, Math.max(0, Number(rawPf)))
+        : 10;
+
     const upsertPayload: Record<string, any> = {
       id: 'default',
       standard_working_days_per_month: Math.max(1, Number(settings.standardWorkingDaysPerMonth) || 26),
@@ -23546,6 +23628,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       deduction_rules: {
         ...(settings.deductionRules || {}),
+        pfEmployeeContributionPercent: pfPercent,
+        overtimeConfig: settings.overtimeConfig || { hourlyRateMultiplier: 1.5 },
         shiftStartTime: settings.shiftStartTime || DEFAULT_SHIFT_START_TIME,
         shiftEndTime: settings.shiftEndTime || DEFAULT_SHIFT_END_TIME,
         lateGracePeriodMinutes: Math.max(0, Number(settings.lateGracePeriodMinutes ?? DEFAULT_GRACE_PERIOD_MINUTES)),
@@ -23561,6 +23645,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         houseRentPercent: 50,
         medicalAllowancePercent: 10,
       },
+      pf_employee_contribution_percent: pfPercent,
       shift_start_time: settings.shiftStartTime || DEFAULT_SHIFT_START_TIME,
       shift_end_time: settings.shiftEndTime || DEFAULT_SHIFT_END_TIME,
       late_grace_period_minutes: Math.max(
@@ -23578,6 +23663,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       let lastError: any = null;
       const workingPayload: Record<string, any> = { ...upsertPayload };
+      const strippedMissingColumns: string[] = [];
 
       for (let attempt = 0; attempt < 10; attempt++) {
         const { error } = await sb
@@ -23585,6 +23671,23 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .upsert(workingPayload, { onConflict: 'id' });
 
         if (!error) {
+          if (strippedMissingColumns.length > 0) {
+            const missingColsLabel = strippedMissingColumns.join(', ');
+            const colMissingStatus: PayrollSettingsDbStatus = {
+              synced: false,
+              status: 'column_missing',
+              error: `Saved via JSON fallback, but Supabase table "public.payroll_settings" is missing column(s): ${missingColsLabel}. Run the SQL fix below once in Supabase SQL Editor, then click Sync to Supabase.`,
+              sqlFix: PAYROLL_SETTINGS_TABLE_SQL,
+            };
+            setPayrollSettingsDbStatus(colMissingStatus);
+            return {
+              dbSynced: false,
+              backedUp: true,
+              error: colMissingStatus.error || undefined,
+              sqlFix: PAYROLL_SETTINGS_TABLE_SQL,
+              dbStatus: colMissingStatus,
+            };
+          }
           const okStatus: PayrollSettingsDbStatus = {
             synced: true,
             status: 'synced',
@@ -23607,6 +23710,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             null;
         }
         if (missingCol && Object.prototype.hasOwnProperty.call(workingPayload, missingCol)) {
+          strippedMissingColumns.push(missingCol);
           delete workingPayload[missingCol];
           continue;
         }

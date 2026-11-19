@@ -3241,6 +3241,7 @@ CREATE TABLE IF NOT EXISTS public.payroll_settings (
   leave_quotas JSONB DEFAULT '{"annualLeave": 14, "casualLeave": 10, "sickLeave": 14, "maternityLeave": 112}'::jsonb,
   deduction_rules JSONB DEFAULT '{"absentDayDeductionMultiplier": 1.0, "lateDeductionRules": "3 late marks equal 1 day deduction", "latePenaltyEnabled": true, "incomeTaxEnabled": true, "providentFundEnabled": true, "pfEmployeeContributionPercent": 10, "pfEmployerContributionPercent": 10}'::jsonb,
   salary_components JSONB DEFAULT '{"houseRentPercent": 50, "medicalAllowancePercent": 10}'::jsonb,
+  pf_employee_contribution_percent NUMERIC(5, 2) DEFAULT 10,
   shift_start_time TEXT DEFAULT '09:00',
   shift_end_time TEXT DEFAULT '18:00',
   late_grace_period_minutes INT DEFAULT 15,
@@ -3249,11 +3250,35 @@ CREATE TABLE IF NOT EXISTS public.payroll_settings (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS standard_working_days_per_month INT DEFAULT 26;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS standard_daily_hours INT DEFAULT 8;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS overtime_config JSONB DEFAULT '{"hourlyRateMultiplier": 1.5}'::jsonb;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS leave_quotas JSONB DEFAULT '{"annualLeave": 14, "casualLeave": 10, "sickLeave": 14, "maternityLeave": 112}'::jsonb;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS deduction_rules JSONB DEFAULT '{"absentDayDeductionMultiplier": 1.0, "lateDeductionRules": "3 late marks equal 1 day deduction", "latePenaltyEnabled": true, "incomeTaxEnabled": true, "providentFundEnabled": true, "pfEmployeeContributionPercent": 10, "pfEmployerContributionPercent": 10}'::jsonb;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS salary_components JSONB DEFAULT '{"houseRentPercent": 50, "medicalAllowancePercent": 10}'::jsonb;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'payroll_settings'
+      AND column_name = 'pf_employee_contribution_percent'
+  ) THEN
+    ALTER TABLE public.payroll_settings ADD COLUMN pf_employee_contribution_percent NUMERIC(5, 2) DEFAULT 10;
+    UPDATE public.payroll_settings
+    SET pf_employee_contribution_percent = COALESCE(
+      NULLIF(deduction_rules->>'pfEmployeeContributionPercent', '')::numeric,
+      10
+    )
+    WHERE deduction_rules ? 'pfEmployeeContributionPercent';
+  END IF;
+END $$;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_start_time TEXT DEFAULT '09:00';
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_end_time TEXT DEFAULT '18:00';
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS late_grace_period_minutes INT DEFAULT 15;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS max_gps_accuracy_meters INT DEFAULT 100;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_by TEXT;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 -- Payroll Indexes
 CREATE INDEX IF NOT EXISTS idx_emp_salary_str_empid ON public.employee_salary_structures(employee_id);
