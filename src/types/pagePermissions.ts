@@ -902,6 +902,7 @@ export const ERP_PAGE_PERMISSIONS_REGISTRY: ERPModuleCategory[] = [
           { key: 'edit_salary_structure', label: 'Edit Salary Structure', description: 'Can modify basic pay, house rent, and allowances' },
           { key: 'export', label: 'Export Pay Slips', description: 'Can print and export monthly pay slips and bank transfer lists' },
           { key: 'approve_leave', label: 'Leave Approve', description: 'Can approve or reject employee leave applications in Payroll & HR - Leaves', isApprovalAction: true },
+          { key: 'approve_advance_loan', label: 'Advance & Loan Approve', description: 'Can approve employee salary advance and loan applications in Payroll & HR - Advances & Loans', isApprovalAction: true },
           ...PAYROLL_SUBPAGE_DEFS.map((p) => ({
             key: p.actionKey,
             label: p.label,
@@ -1618,7 +1619,10 @@ export function canApproveTransaction(
   const hasApprove =
     hasPageAction(user, pageId, 'approve') ||
     hasPageAction(user, pageId, 'confirm') ||
-    (pageId === 'payroll' && hasPageAction(user, pageId, 'approve_payroll'));
+    (pageId === 'payroll' &&
+      (hasPageAction(user, pageId, 'approve_payroll') ||
+        hasPageAction(user, pageId, 'approve_leave') ||
+        hasPageAction(user, pageId, 'approve_advance_loan')));
   if (!hasApprove) {
     return { allowed: false, reason: 'You do not have approval permissions for this page.' };
   }

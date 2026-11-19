@@ -22581,12 +22581,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveAdvanceLoan = async (id: string, approvedBy?: string) => {
-    if (!hasPageAction(currentUser, 'payroll', 'approve_payroll')) {
-      console.warn('Permission denied: approve_payroll required to approve advance/loan.');
-      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve loan (${id}) without approve_payroll permission`);
+    if (!hasPageAction(currentUser, 'payroll', 'approve_advance_loan')) {
+      console.warn('Permission denied: approve_advance_loan required to approve advance/loan.');
+      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve loan (${id}) without approve_advance_loan permission`);
       return {
         success: false,
-        error: 'Permission denied: Approve Salary Sheet permission is required to approve loans.',
+        error: 'Permission denied: Advance & Loan Approve permission is required to approve advances/loans.',
       };
     }
     const approvalDate = new Date().toISOString().slice(0, 10);

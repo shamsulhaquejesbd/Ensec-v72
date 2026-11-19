@@ -182,6 +182,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   const canCreatePayroll = hasPageAction('payroll', 'create_payroll');
   const canApprovePayroll = hasPageAction('payroll', 'approve_payroll');
   const canApproveLeave = hasPageAction('payroll', 'approve_leave');
+  const canApproveAdvanceLoan = hasPageAction('payroll', 'approve_advance_loan');
   const canDisbursePayroll = hasPageAction('payroll', 'disburse');
   const canEditSalaryStructure = hasPageAction('payroll', 'edit_salary_structure');
   const canExportPayroll = hasPageAction('payroll', 'export');
@@ -199,6 +200,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     !canCreatePayroll &&
     !canApprovePayroll &&
     !canApproveLeave &&
+    !canApproveAdvanceLoan &&
     !canDisbursePayroll &&
     !canEditSalaryStructure &&
     !canExportPayroll &&
@@ -463,8 +465,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     };
   }, [ownLeaveEmployee, currentEmployeeProfile, currentUser]);
 
-  const visibleLeaveRecords = useMemo(() => {
-    if (canManageAllLeaves) return leaveRecords;
+  const ownLeaveRecords = useMemo(() => {
     if (!currentUser) return [];
     const uid = (currentUser.id || '').trim().toLowerCase();
     const selfId = (selfLeaveProfile?.id || '').trim().toLowerCase();
@@ -486,7 +487,93 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       }
       return false;
     });
-  }, [canManageAllLeaves, leaveRecords, currentUser, selfLeaveProfile, ownLeaveEmployee]);
+  }, [leaveRecords, currentUser, selfLeaveProfile, ownLeaveEmployee]);
+
+  const currentLeaveYear = useMemo(
+    () => Number((todayIso || '').slice(0, 4)) || new Date().getFullYear(),
+    [todayIso]
+  );
+
+  const ownLeaveSummary = useMemo(() => {
+    const yearStr = String(currentLeaveYear);
+    const yearRecords = ownLeaveRecords.filter((l) => {
+      const dateStr = (l.startDate || l.appliedAt || '').trim();
+      return !dateStr || dateStr.startsWith(yearStr);
+    });
+
+    const q = payrollSettings?.leaveQuotas || {
+      annualLeave: 14,
+      casualLeave: 10,
+      sickLeave: 14,
+      maternityLeave: 112,
+    };
+
+    const getDays = (l: (typeof yearRecords)[number]) =>
+      Number(l.daysCount ?? l.totalDays ?? 0) || 0;
+
+    const calcType = (leaveTypeName: LeaveType, entitled: number) => {
+      const matching = yearRecords.filter((l) => l.leaveType === leaveTypeName);
+      const availed = matching
+        .filter((l) => l.status === 'Approved')
+        .reduce((sum, l) => sum + getDays(l), 0);
+      const pending = matching
+        .filter((l) => l.status === 'Pending')
+        .reduce((sum, l) => sum + getDays(l), 0);
+      const balance = entitled > 0 ? Math.max(0, entitled - availed) : 0;
+      return {
+        leaveType: leaveTypeName,
+        entitled,
+        availed,
+        pending,
+        balance,
+      };
+    };
+
+    const annual = calcType('Annual Leave', Number(q.annualLeave ?? 14));
+    const casual = calcType('Casual Leave', Number(q.casualLeave ?? 10));
+    const sick = calcType('Sick Leave', Number(q.sickLeave ?? 14));
+    const maternity = calcType('Maternity Leave', Number(q.maternityLeave ?? 112));
+    const unpaid = calcType('Unpaid Leave', 0);
+
+    const regularEntitled = annual.entitled + casual.entitled + sick.entitled;
+    const regularAvailed = annual.availed + casual.availed + sick.availed;
+    const regularPending = annual.pending + casual.pending + sick.pending;
+    const regularBalance = annual.balance + casual.balance + sick.balance;
+
+    const totalPending =
+      regularPending + maternity.pending + unpaid.pending;
+    const pendingCount = yearRecords.filter((l) => l.status === 'Pending').length;
+    const approvedCount = yearRecords.filter((l) => l.status === 'Approved').length;
+
+    const rows = [
+      annual,
+      casual,
+      sick,
+      maternity,
+      ...(unpaid.availed > 0 || unpaid.pending > 0 ? [unpaid] : []),
+    ];
+
+    return {
+      rows,
+      annual,
+      casual,
+      sick,
+      maternity,
+      unpaid,
+      regularEntitled,
+      regularAvailed,
+      regularPending,
+      regularBalance,
+      totalPending,
+      pendingCount,
+      approvedCount,
+    };
+  }, [ownLeaveRecords, currentLeaveYear, payrollSettings]);
+
+  const visibleLeaveRecords = useMemo(() => {
+    if (canManageAllLeaves) return leaveRecords;
+    return ownLeaveRecords;
+  }, [canManageAllLeaves, leaveRecords, ownLeaveRecords]);
 
   useEffect(() => {
     if (!leaveEmployeeDropdownOpen) return;
@@ -3063,39 +3150,155 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
             </div>
           )}
 
-          {/* Quota Highlights */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="p-3.5 rounded-xl bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800">
-              <span className="text-[10px] uppercase font-bold text-blue-700 dark:text-blue-300 block">
-                Annual Leave Quota
-              </span>
-              <span className="text-xl font-black text-blue-600 dark:text-blue-400">
-                {payrollSettings?.leaveQuotas?.annualLeave ?? 14} Days
-              </span>
+          {/* User Own Leave Profile & Balance Info (Current User Only) */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 space-y-4 shadow-2xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 flex items-center justify-center font-black text-sm shrink-0">
+                  {(selfLeaveProfile?.name || currentUser?.name || 'U')
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .slice(0, 2)
+                    .map((p) => p[0]?.toUpperCase() || '')
+                    .join('') || 'U'}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                      {selfLeaveProfile?.name || currentUser?.name || 'Employee'}
+                    </span>
+                    {selfLeaveProfile?.code && (
+                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400 font-bold">
+                        {selfLeaveProfile.code}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                    {selfLeaveProfile?.designation || currentUser?.role || 'Employee'}
+                    {selfLeaveProfile?.department ? ` • ${selfLeaveProfile.department}` : ''}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                  Year {currentLeaveYear}
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 text-[10px] font-bold inline-flex items-center gap-1">
+                  <Lock className="w-3 h-3" />
+                  <span>My Own Leave Info</span>
+                </span>
+              </div>
             </div>
-            <div className="p-3.5 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800">
-              <span className="text-[10px] uppercase font-bold text-emerald-700 dark:text-emerald-300 block">
-                Casual Leave Quota
-              </span>
-              <span className="text-xl font-black text-emerald-600 dark:text-emerald-400">
-                {payrollSettings?.leaveQuotas?.casualLeave ?? 10} Days
-              </span>
+
+            {/* 4 Key Summary Numbers: Entitled, Availed, Approval Pending, Balance */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-xl bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800">
+                <span className="text-[10px] uppercase font-bold text-blue-700 dark:text-blue-300 block">
+                  Entitled
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black text-blue-600 dark:text-blue-400">
+                    {ownLeaveSummary.regularEntitled}
+                  </span>
+                  <span className="text-xs font-bold text-blue-700/80 dark:text-blue-300/80">
+                    Days
+                  </span>
+                </div>
+                <span className="text-[10px] text-blue-700/75 dark:text-blue-300/75 block mt-0.5">
+                  Annual {ownLeaveSummary.annual.entitled} + Casual {ownLeaveSummary.casual.entitled} + Sick {ownLeaveSummary.sick.entitled}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-purple-50/70 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800">
+                <span className="text-[10px] uppercase font-bold text-purple-700 dark:text-purple-300 block">
+                  Availed
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black text-purple-600 dark:text-purple-400">
+                    {ownLeaveSummary.regularAvailed}
+                  </span>
+                  <span className="text-xs font-bold text-purple-700/80 dark:text-purple-300/80">
+                    Days
+                  </span>
+                </div>
+                <span className="text-[10px] text-purple-700/75 dark:text-purple-300/75 block mt-0.5">
+                  {ownLeaveSummary.approvedCount} approved in {currentLeaveYear}
+                  {ownLeaveSummary.maternity.availed > 0 ? ` (+${ownLeaveSummary.maternity.availed}d Maternity)` : ''}
+                  {ownLeaveSummary.unpaid.availed > 0 ? ` (+${ownLeaveSummary.unpaid.availed}d Unpaid)` : ''}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800">
+                <span className="text-[10px] uppercase font-bold text-amber-700 dark:text-amber-300 block">
+                  Approval Pending
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black text-amber-600 dark:text-amber-400">
+                    {ownLeaveSummary.totalPending}
+                  </span>
+                  <span className="text-xs font-bold text-amber-700/80 dark:text-amber-300/80">
+                    Days
+                  </span>
+                </div>
+                <span className="text-[10px] text-amber-700/75 dark:text-amber-300/75 block mt-0.5">
+                  {ownLeaveSummary.pendingCount} pending request{ownLeaveSummary.pendingCount === 1 ? '' : 's'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800">
+                <span className="text-[10px] uppercase font-bold text-emerald-700 dark:text-emerald-300 block">
+                  Balance
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black text-emerald-600 dark:text-emerald-400">
+                    {ownLeaveSummary.regularBalance}
+                  </span>
+                  <span className="text-xs font-bold text-emerald-700/80 dark:text-emerald-300/80">
+                    Days
+                  </span>
+                </div>
+                <span className="text-[10px] text-emerald-700/75 dark:text-emerald-300/75 block mt-0.5">
+                  {ownLeaveSummary.regularPending > 0
+                    ? `${Math.max(0, ownLeaveSummary.regularBalance - ownLeaveSummary.regularPending)}d after pending`
+                    : 'Available regular leave balance'}
+                </span>
+              </div>
             </div>
-            <div className="p-3.5 rounded-xl bg-amber-50/60 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800">
-              <span className="text-[10px] uppercase font-bold text-amber-700 dark:text-amber-300 block">
-                Sick Leave Quota
-              </span>
-              <span className="text-xl font-black text-amber-600 dark:text-amber-400">
-                {payrollSettings?.leaveQuotas?.sickLeave ?? 14} Days
-              </span>
-            </div>
-            <div className="p-3.5 rounded-xl bg-purple-50/60 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800">
-              <span className="text-[10px] uppercase font-bold text-purple-700 dark:text-purple-300 block">
-                Maternity Leave
-              </span>
-              <span className="text-xl font-black text-purple-600 dark:text-purple-400">
-                {payrollSettings?.leaveQuotas?.maternityLeave ?? 112} Days
-              </span>
+
+            {/* Per-Category Breakdown for Current User */}
+            <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-800">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase text-slate-500">
+                    <th className="py-2 px-3">Leave Type</th>
+                    <th className="py-2 px-3 text-right">Entitled</th>
+                    <th className="py-2 px-3 text-right">Availed</th>
+                    <th className="py-2 px-3 text-right">Approval Pending</th>
+                    <th className="py-2 px-3 text-right">Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                  {ownLeaveSummary.rows.map((row) => (
+                    <tr key={row.leaveType} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
+                      <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200">
+                        {row.leaveType}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-bold text-blue-600 dark:text-blue-400">
+                        {row.entitled}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-bold text-purple-600 dark:text-purple-400">
+                        {row.availed}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-bold text-amber-600 dark:text-amber-400">
+                        {row.pending}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-black text-emerald-600 dark:text-emerald-400">
+                        {row.balance}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
@@ -3481,7 +3684,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                               >
                                 Schedule
                               </button>
-                              {loan.status === 'Pending' && canApprovePayroll && (
+                              {loan.status === 'Pending' && canApproveAdvanceLoan && (
                                 <button
                                   type="button"
                                   onClick={async () => {
