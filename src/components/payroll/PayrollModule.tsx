@@ -177,6 +177,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     hasPageAccess('payroll') && payrollPagePerms.view && firstPermittedTab !== null;
   const canCreatePayroll = hasPageAction('payroll', 'create_payroll');
   const canApprovePayroll = hasPageAction('payroll', 'approve_payroll');
+  const canApproveLeave = hasPageAction('payroll', 'approve_leave');
   const canDisbursePayroll = hasPageAction('payroll', 'disburse');
   const canEditSalaryStructure = hasPageAction('payroll', 'edit_salary_structure');
   const canExportPayroll = hasPageAction('payroll', 'export');
@@ -185,6 +186,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   const isReadOnlyPayrollUser =
     !canCreatePayroll &&
     !canApprovePayroll &&
+    !canApproveLeave &&
     !canDisbursePayroll &&
     !canEditSalaryStructure &&
     !canExportPayroll;
@@ -3038,7 +3040,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                         </td>
                         <td className="py-3 px-4 text-right">
                           {l.status === 'Pending' &&
-                            (canApprovePayroll ? (
+                            (canApproveLeave ? (
                               <div className="inline-flex gap-1">
                                 <button
                                   type="button"

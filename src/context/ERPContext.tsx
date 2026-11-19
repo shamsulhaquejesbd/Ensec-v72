@@ -22022,9 +22022,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveLeave = (id: string, approvedBy: string) => {
-    if (!hasPageAction(currentUser, 'payroll', 'approve_payroll')) {
-      console.warn('Permission denied: approve_payroll required to approve leave.');
-      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve leave (${id}) without approve_payroll permission`);
+    if (!hasPageAction(currentUser, 'payroll', 'approve_leave')) {
+      console.warn('Permission denied: approve_leave required to approve leave.');
+      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve leave (${id}) without approve_leave permission`);
       return;
     }
     const approvedAt = new Date().toISOString();
@@ -22046,9 +22046,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectLeave = (id: string, reason: string) => {
-    if (!hasPageAction(currentUser, 'payroll', 'approve_payroll')) {
-      console.warn('Permission denied: approve_payroll required to reject leave.');
-      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to reject leave (${id}) without approve_payroll permission`);
+    if (!hasPageAction(currentUser, 'payroll', 'approve_leave')) {
+      console.warn('Permission denied: approve_leave required to reject leave.');
+      addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to reject leave (${id}) without approve_leave permission`);
       return;
     }
     let updatedRecord: LeaveRecord | null = null;

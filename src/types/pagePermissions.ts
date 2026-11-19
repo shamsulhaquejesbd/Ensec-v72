@@ -901,6 +901,7 @@ export const ERP_PAGE_PERMISSIONS_REGISTRY: ERPModuleCategory[] = [
           { key: 'disburse', label: 'Disburse Salary Payments', description: 'Can release bank transfer advice or cash salary payouts' },
           { key: 'edit_salary_structure', label: 'Edit Salary Structure', description: 'Can modify basic pay, house rent, and allowances' },
           { key: 'export', label: 'Export Pay Slips', description: 'Can print and export monthly pay slips and bank transfer lists' },
+          { key: 'approve_leave', label: 'Leave Approve', description: 'Can approve or reject employee leave applications in Payroll & HR - Leaves', isApprovalAction: true },
           ...PAYROLL_SUBPAGE_DEFS.map((p) => ({
             key: p.actionKey,
             label: p.label,
