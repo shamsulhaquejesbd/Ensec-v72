@@ -330,6 +330,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     sqlFix?: string;
   } | null>(null);
   const [salaryStructurePage, setSalaryStructurePage] = useState<number>(1);
+  const [salaryStructureSearchQuery, setSalaryStructureSearchQuery] = useState<string>('');
   const SALARY_STRUCTURE_PAGE_SIZE = 10;
 
   const findSalaryStructureForEmployee = (emp: FieldForceRep): EmployeeSalaryStructure | undefined => {
@@ -829,11 +830,31 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   };
 
   const salaryStructurePagination = useMemo(() => {
-    const totalEmployees = fieldForceReps.length;
+    const q = salaryStructureSearchQuery.trim().toLowerCase();
+    const filteredEmployees = !q
+      ? fieldForceReps
+      : fieldForceReps.filter((emp) => {
+          const name = (emp.name || '').toLowerCase();
+          const code = (emp.code || '').toLowerCase();
+          const dept = (emp.department || '').toLowerCase();
+          const desig = (emp.designation || '').toLowerCase();
+          const cat = (emp.employeeCategory || '').toLowerCase();
+          const phone = (emp.mobileNumber || '').toLowerCase();
+          return (
+            name.includes(q) ||
+            code.includes(q) ||
+            dept.includes(q) ||
+            desig.includes(q) ||
+            cat.includes(q) ||
+            phone.includes(q)
+          );
+        });
+
+    const totalEmployees = filteredEmployees.length;
     const totalPages = Math.max(1, Math.ceil(totalEmployees / SALARY_STRUCTURE_PAGE_SIZE));
     const safePage = Math.min(Math.max(1, salaryStructurePage), totalPages);
     const startIndex = (safePage - 1) * SALARY_STRUCTURE_PAGE_SIZE;
-    const paginatedEmployees = fieldForceReps.slice(startIndex, startIndex + SALARY_STRUCTURE_PAGE_SIZE);
+    const paginatedEmployees = filteredEmployees.slice(startIndex, startIndex + SALARY_STRUCTURE_PAGE_SIZE);
     const startRecord = totalEmployees === 0 ? 0 : startIndex + 1;
     const endRecord = Math.min(safePage * SALARY_STRUCTURE_PAGE_SIZE, totalEmployees);
 
@@ -867,7 +888,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       endRecord,
       pageNumbers,
     };
-  }, [fieldForceReps, salaryStructurePage]);
+  }, [fieldForceReps, salaryStructurePage, salaryStructureSearchQuery]);
 
   useEffect(() => {
     if (salaryStructurePage > salaryStructurePagination.totalPages) {
@@ -1476,65 +1497,102 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       {/* ========================================================================= */}
       {!isUnknownExplicitTab && activeTab === 'salary_structure' && payrollPagePerms.salary_structure && (
         <div className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                Employee Salary Structure Master
-              </h2>
-              
+          <div className="flex flex-col gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Employee Salary Structure Master
+                </h2>
+              </div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                {salaryStructuresDbStatus.synced ? (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-bold">
+                    <Database className="w-3 h-3" />
+                    Supabase Synced
+                  </span>
+                ) : salaryStructuresDbStatus.status !== 'unknown' ? (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/70 text-[10px] font-bold">
+                    <Database className="w-3 h-3" />
+                    {salaryStructuresDbStatus.status === 'rls_blocked'
+                      ? 'Supabase RLS Blocked'
+                      : salaryStructuresDbStatus.status === 'table_missing'
+                      ? 'Supabase Table Missing'
+                      : 'Supabase Sync Needed'}
+                  </span>
+                ) : null}
+                {canEditSalaryStructure && (
+                  <button
+                    type="button"
+                    disabled={isSyncingStructures}
+                    onClick={async () => {
+                      setIsSyncingStructures(true);
+                      setStructureFeedback(null);
+                      const res = await syncSalaryStructuresToSupabase();
+                      setIsSyncingStructures(false);
+                      if (res.success) {
+                        setStructureFeedback({
+                          type: 'success',
+                          message:
+                            res.syncedCount > 0
+                              ? `Successfully synced ${res.syncedCount} salary structure(s) to Supabase.`
+                              : 'Supabase employee_salary_structures connection verified and ready.',
+                        });
+                      } else {
+                        setStructureFeedback({
+                          type: 'warning',
+                          message:
+                            res.error ||
+                            'Could not save salary structures to Supabase. Run the SQL policy below in Supabase SQL Editor.',
+                          sqlFix: res.sqlFix || SALARY_STRUCTURES_TABLE_SQL,
+                        });
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isSyncingStructures ? 'animate-spin' : ''}`} />
+                    <span>{isSyncingStructures ? 'Syncing...' : 'Sync to Supabase'}</span>
+                  </button>
+                )}
+                <span className="text-xs text-slate-500">
+                  Configured: <b>{salaryStructures.length}</b> of {fieldForceReps.length}
+                </span>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2.5">
-              {salaryStructuresDbStatus.synced ? (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-bold">
-                  <Database className="w-3 h-3" />
-                  Supabase Synced
-                </span>
-              ) : salaryStructuresDbStatus.status !== 'unknown' ? (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/70 text-[10px] font-bold">
-                  <Database className="w-3 h-3" />
-                  {salaryStructuresDbStatus.status === 'rls_blocked'
-                    ? 'Supabase RLS Blocked'
-                    : salaryStructuresDbStatus.status === 'table_missing'
-                    ? 'Supabase Table Missing'
-                    : 'Supabase Sync Needed'}
-                </span>
-              ) : null}
-              {canEditSalaryStructure && (
-                <button
-                  type="button"
-                  disabled={isSyncingStructures}
-                  onClick={async () => {
-                    setIsSyncingStructures(true);
-                    setStructureFeedback(null);
-                    const res = await syncSalaryStructuresToSupabase();
-                    setIsSyncingStructures(false);
-                    if (res.success) {
-                      setStructureFeedback({
-                        type: 'success',
-                        message:
-                          res.syncedCount > 0
-                            ? `Successfully synced ${res.syncedCount} salary structure(s) to Supabase.`
-                            : 'Supabase employee_salary_structures connection verified and ready.',
-                      });
-                    } else {
-                      setStructureFeedback({
-                        type: 'warning',
-                        message:
-                          res.error ||
-                          'Could not save salary structures to Supabase. Run the SQL policy below in Supabase SQL Editor.',
-                        sqlFix: res.sqlFix || SALARY_STRUCTURES_TABLE_SQL,
-                      });
-                    }
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1 border-t border-slate-100 dark:border-slate-800/80">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+                <input
+                  type="text"
+                  aria-label="Search employee salary structure"
+                  value={salaryStructureSearchQuery}
+                  onChange={(e) => {
+                    setSalaryStructureSearchQuery(e.target.value);
+                    setSalaryStructurePage(1);
                   }}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isSyncingStructures ? 'animate-spin' : ''}`} />
-                  <span>{isSyncingStructures ? 'Syncing...' : 'Sync to Supabase'}</span>
-                </button>
+                  placeholder="Search Employee Name, ID, Dept, or Designation..."
+                  className="w-full pl-8 pr-8 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+                />
+                {salaryStructureSearchQuery && (
+                  <button
+                    type="button"
+                    aria-label="Clear employee search"
+                    onClick={() => {
+                      setSalaryStructureSearchQuery('');
+                      setSalaryStructurePage(1);
+                    }}
+                    className="absolute right-2.5 top-2 p-0.5 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700/60"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              {salaryStructureSearchQuery.trim() && (
+                <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  Found <b>{salaryStructurePagination.totalEmployees}</b> matching employee
+                  {salaryStructurePagination.totalEmployees === 1 ? '' : 's'}
+                </span>
               )}
-              <span className="text-xs text-slate-500">
-                Configured: <b>{salaryStructures.length}</b> of {fieldForceReps.length}
-              </span>
             </div>
           </div>
 
@@ -1665,7 +1723,25 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                   {salaryStructurePagination.paginatedEmployees.length === 0 ? (
                     <tr>
                       <td colSpan={10} className="py-10 text-center text-slate-500 dark:text-slate-400">
-                        No employees found.
+                        {salaryStructureSearchQuery.trim() ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <span>
+                              No employees found matching &ldquo;{salaryStructureSearchQuery.trim()}&rdquo;.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSalaryStructureSearchQuery('');
+                                setSalaryStructurePage(1);
+                              }}
+                              className="px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-slate-800 text-[11px] font-semibold"
+                            >
+                              Clear Search
+                            </button>
+                          </div>
+                        ) : (
+                          'No employees found.'
+                        )}
                       </td>
                     </tr>
                   ) : (
