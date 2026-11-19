@@ -24,6 +24,7 @@ import {
   Archive,
   Lock,
   Trash2,
+  Search,
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
 import { Product, ProductionOrder, BOMItem, ProductionCostRecord } from '../../types/erp.ts';
@@ -164,6 +165,25 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
     type: 'success' | 'error';
     message: string;
   } | null>(null);
+  const [bomSearchQuery, setBomSearchQuery] = useState('');
+
+  const filteredBomProducts = React.useMemo(() => {
+    const q = bomSearchQuery.trim().toLowerCase();
+    if (!q) return products;
+    return products.filter((prod) =>
+      [
+        prod.name,
+        prod.code,
+        prod.model,
+        prod.batteryType,
+        `${prod.voltageV}v`,
+        `${prod.capacityAh}ah`,
+        `${prod.voltageV}v ${prod.capacityAh}ah`,
+      ]
+        .filter(Boolean)
+        .some((field) => String(field).toLowerCase().includes(q))
+    );
+  }, [products, bomSearchQuery]);
 
   const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
 
@@ -967,6 +987,38 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
             </div>
           </div>
 
+          {/* Product Search Bar for BOM Master */}
+          <div className="p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={bomSearchQuery}
+                onChange={(e) => setBomSearchQuery(e.target.value)}
+                placeholder="Search product by name, model, SKU code, voltage/capacity, or battery type..."
+                aria-label="Search products in BOM Master"
+                className="w-full pl-9 pr-9 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
+              />
+              {bomSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setBomSearchQuery('')}
+                  title="Clear product search"
+                  aria-label="Clear product search"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700 transition cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400 font-medium px-1 shrink-0 flex items-center justify-between sm:justify-end gap-2">
+              <span>
+                Showing <strong className="text-slate-900 dark:text-white">{filteredBomProducts.length}</strong> of{' '}
+                <strong className="text-slate-900 dark:text-white">{products.length}</strong> products
+              </span>
+            </div>
+          </div>
+
           {bomFeedback && (
             <div
               className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
@@ -993,8 +1045,31 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {products.map((prod) => {
+          {filteredBomProducts.length === 0 ? (
+            <div className="p-10 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-2.5">
+              <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
+                <Search className="w-5 h-5" />
+              </div>
+              <div className="text-sm font-bold text-slate-900 dark:text-white">
+                No matching products found
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                No products matched &ldquo;{bomSearchQuery}&rdquo;. Try searching by another product name, model number, or SKU code.
+              </p>
+              {bomSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setBomSearchQuery('')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition cursor-pointer mt-1"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>Clear Search</span>
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredBomProducts.map((prod) => {
               const bomDef = (boms || []).find(
                 (b) =>
                   b.productId === prod.id ||
@@ -1128,9 +1203,10 @@ export const ManufacturingModule: React.FC<ManufacturingModuleProps> = ({ initia
                     )}
                   </div>
                 </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       ) : null}
 
