@@ -3308,6 +3308,10 @@ ALTER TABLE public.employee_leaves ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Allow public all employee_leaves" ON public.employee_leaves;
 CREATE POLICY "Allow public all employee_leaves" ON public.employee_leaves FOR ALL USING (true) WITH CHECK (true);
 
+ALTER TABLE public.employee_advances_loans ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow public all employee_advances_loans" ON public.employee_advances_loans;
+CREATE POLICY "Allow public all employee_advances_loans" ON public.employee_advances_loans FOR ALL USING (true) WITH CHECK (true);
+
 -- Grants
 GRANT ALL ON public.employee_salary_structures TO postgres, anon, authenticated, service_role;
 GRANT ALL ON public.employee_attendances TO postgres, anon, authenticated, service_role;

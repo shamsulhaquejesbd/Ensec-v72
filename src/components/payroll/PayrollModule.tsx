@@ -94,6 +94,7 @@ import {
   SALARY_STRUCTURES_TABLE_SQL,
   PAYROLL_SETTINGS_TABLE_SQL,
   EMPLOYEE_ATTENDANCES_TABLE_SQL,
+  EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
 } from '../../types/payroll.ts';
 import { FieldForceRep } from '../../types/erp.ts';
 import { EmployeeAttendanceCardModal } from './EmployeeAttendanceCardModal.tsx';
@@ -135,6 +136,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     rejectedAttendanceAttempts,
     leaveRecords,
     advanceLoans,
+    advanceLoansDbStatus,
+    syncAdvanceLoansToSupabase,
     bonusRecords,
     monthlyPayrollRuns,
     salaryPaymentRecords,
@@ -425,6 +428,15 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   const [loanTenure, setLoanTenure] = useState<number>(1);
   const [loanStartMonth, setLoanStartMonth] = useState<string>(currentMonthIso);
   const [loanReason, setLoanReason] = useState<string>('');
+  const [loanFormError, setLoanFormError] = useState<string>('');
+  const [isSubmittingLoan, setIsSubmittingLoan] = useState<boolean>(false);
+  const [isSyncingLoans, setIsSyncingLoans] = useState<boolean>(false);
+  const [copiedLoansSql, setCopiedLoansSql] = useState<boolean>(false);
+  const [loanFeedback, setLoanFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+    sqlFix?: string;
+  } | null>(null);
 
   // Form state for Bonus
   const [bnsEmployeeId, setBnsEmployeeId] = useState<string>('');
@@ -3099,19 +3111,177 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 Automated monthly salary deduction, installment schedules, early settlement, and ledger tracking.
               </p>
             </div>
-            {canCreatePayroll && (
-              <button
-                onClick={() => {
-                  setLoanEmployeeId(fieldForceReps[0]?.id || '');
-                  setShowLoanModal(true);
-                }}
-                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Apply Loan / Advance</span>
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {advanceLoansDbStatus.synced ? (
+                <span className="px-2.5 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold inline-flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5" />
+                  <span>Supabase Synced</span>
+                </span>
+              ) : advanceLoansDbStatus.status !== 'unknown' ? (
+                <span className="px-2.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-[11px] font-bold inline-flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5" />
+                  <span>
+                    {advanceLoansDbStatus.status === 'rls_blocked'
+                      ? 'Backup Mode (RLS Fix Needed)'
+                      : 'Database Setup Needed'}
+                  </span>
+                </span>
+              ) : null}
+
+              {canCreatePayroll && syncAdvanceLoansToSupabase && (
+                <button
+                  type="button"
+                  disabled={isSyncingLoans}
+                  onClick={async () => {
+                    setIsSyncingLoans(true);
+                    const res = await syncAdvanceLoansToSupabase();
+                    setIsSyncingLoans(false);
+                    if (res.dbSynced) {
+                      setLoanFeedback({
+                        type: 'success',
+                        message:
+                          res.syncedCount > 0
+                            ? `Synced ${res.syncedCount} advance/loan record(s) directly to Supabase.`
+                            : 'Supabase table "public.employee_advances_loans" is ready and writable.',
+                      });
+                    } else {
+                      setLoanFeedback({
+                        type: res.backedUp ? 'warning' : 'error',
+                        message: res.error || 'Could not write directly to public.employee_advances_loans.',
+                        sqlFix: res.sqlFix,
+                      });
+                    }
+                  }}
+                  className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingLoans ? 'animate-spin' : ''}`} />
+                  <span>{isSyncingLoans ? 'Syncing...' : 'Sync to Supabase'}</span>
+                </button>
+              )}
+
+              {canCreatePayroll && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoanEmployeeId(fieldForceReps[0]?.id || '');
+                    setLoanType('Employee Loan');
+                    setLoanAmount(0);
+                    setLoanTenure(1);
+                    setLoanStartMonth(currentMonthIso);
+                    setLoanReason('');
+                    setLoanFormError('');
+                    setShowLoanModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Apply Loan / Advance</span>
+                </button>
+              )}
+            </div>
           </div>
+
+          {loanFeedback && (
+            <div
+              className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+                loanFeedback.type === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                  : loanFeedback.type === 'warning'
+                  ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+                  : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {loanFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                )}
+                <span className="font-medium leading-relaxed">{loanFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLoanFeedback(null)}
+                className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {canCreatePayroll &&
+            !advanceLoansDbStatus.synced &&
+            (advanceLoansDbStatus.status === 'rls_blocked' ||
+              advanceLoansDbStatus.status === 'table_missing' ||
+              advanceLoansDbStatus.status === 'error' ||
+              Boolean(loanFeedback?.sqlFix)) && (
+              <div className="p-4 rounded-2xl bg-amber-50/90 dark:bg-amber-950/35 border border-amber-200 dark:border-amber-800/80 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <Database className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                  <div>
+                    <div className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                      Supabase Permission / Table Setup Needed for Advances &amp; Loans
+                    </div>
+                    <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5 leading-relaxed">
+                      {advanceLoansDbStatus.error ||
+                        loanFeedback?.message ||
+                        'Supabase Row-Level Security blocked direct writes to public.employee_advances_loans.'}{' '}
+                      Run the SQL script below once in Supabase SQL Editor, then click <b>Sync to Supabase</b>.
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                      One-Time Supabase SQL Fix (RLS Policy + Table)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(
+                              advanceLoansDbStatus.sqlFix ||
+                                loanFeedback?.sqlFix ||
+                                EMPLOYEE_ADVANCES_LOANS_TABLE_SQL
+                            );
+                            setCopiedLoansSql(true);
+                            setTimeout(() => setCopiedLoansSql(false), 2500);
+                          } catch {}
+                        }}
+                        className="px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-[10px] font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100/60 dark:hover:bg-slate-800 flex items-center gap-1"
+                      >
+                        {copiedLoansSql ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Copy SQL</span>
+                          </>
+                        )}
+                      </button>
+                      <a
+                        href={supabaseSqlEditorUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-[10px] font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100/60 dark:hover:bg-slate-800 flex items-center gap-1"
+                      >
+                        <span>Open SQL Editor</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </div>
+                  <pre className="p-3 rounded-lg bg-slate-900 text-slate-100 text-[10px] font-mono overflow-x-auto max-h-40 leading-relaxed border border-slate-800">
+                    {advanceLoansDbStatus.sqlFix ||
+                      loanFeedback?.sqlFix ||
+                      EMPLOYEE_ADVANCES_LOANS_TABLE_SQL}
+                  </pre>
+                </div>
+              </div>
+            )}
 
           {/* Loans Table */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xs overflow-hidden">
@@ -3208,7 +3378,32 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                               </button>
                               {loan.status === 'Pending' && canApprovePayroll && (
                                 <button
-                                  onClick={() => approveAdvanceLoan(loan.id, currentUser?.name || 'Managing Director')}
+                                  type="button"
+                                  onClick={async () => {
+                                    const res = await approveAdvanceLoan(
+                                      loan.id,
+                                      currentUser?.name || 'Managing Director'
+                                    );
+                                    if (!res?.success) {
+                                      setLoanFeedback({
+                                        type: 'error',
+                                        message: res?.error || 'Failed to approve loan.',
+                                      });
+                                    } else if (res.dbSynced) {
+                                      setLoanFeedback({
+                                        type: 'success',
+                                        message: `Approved ${loan.loanType || 'Loan'} for ${loan.employeeName} and synced to Supabase.`,
+                                      });
+                                    } else if (res.backedUp) {
+                                      setLoanFeedback({
+                                        type: 'warning',
+                                        message:
+                                          res.error ||
+                                          `Approved ${loan.loanType || 'Loan'} for ${loan.employeeName} via Supabase backup.`,
+                                        sqlFix: res.sqlFix,
+                                      });
+                                    }
+                                  }}
                                   className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold shadow-2xs"
                                 >
                                   Approve
@@ -5136,37 +5331,95 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                   rows={2}
                   value={loanReason}
                   onChange={(e) => setLoanReason(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700"
+                  placeholder="Enter purpose or justification for the advance/loan..."
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"
                 />
               </div>
+
+              {loanFormError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 font-semibold">
+                  {loanFormError}
+                </div>
+              )}
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
               <button
+                type="button"
+                disabled={isSubmittingLoan}
                 onClick={() => setShowLoanModal(false)}
-                className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold"
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
-                onClick={() => {
+                type="button"
+                disabled={isSubmittingLoan}
+                onClick={async () => {
                   const emp = fieldForceReps.find((r) => r.id === loanEmployeeId) || fieldForceReps[0];
-                  applyAdvanceLoan({
+                  if (!emp) {
+                    setLoanFormError('No employee selected. Please add an employee first.');
+                    return;
+                  }
+                  const amount = Number(loanAmount) || 0;
+                  const tenure = Math.floor(Number(loanTenure) || 0);
+                  if (amount <= 0) {
+                    setLoanFormError('Principal Amount must be greater than 0 BDT.');
+                    return;
+                  }
+                  if (tenure < 1 || tenure > 60) {
+                    setLoanFormError('Repayment Tenure must be between 1 and 60 months.');
+                    return;
+                  }
+                  if (!/^\d{4}-\d{2}$/.test(loanStartMonth.trim())) {
+                    setLoanFormError('Start Month must be in YYYY-MM format (e.g. 2026-11).');
+                    return;
+                  }
+                  setLoanFormError('');
+                  setIsSubmittingLoan(true);
+                  const res = await applyAdvanceLoan({
                     employeeId: emp.id,
                     employeeCode: emp.code,
                     employeeName: emp.name,
                     loanType,
-                    principalAmountBDT: loanAmount,
-                    repaymentTenureMonths: loanTenure,
-                    monthlyDeductionBDT: Math.round(loanAmount / loanTenure),
-                    deductionStartMonthYear: loanStartMonth,
-                    purpose: loanReason,
+                    principalAmountBDT: amount,
+                    repaymentTenureMonths: tenure,
+                    monthlyDeductionBDT: Math.round(amount / tenure),
+                    deductionStartMonthYear: loanStartMonth.trim(),
+                    purpose: loanReason.trim(),
                   });
+                  setIsSubmittingLoan(false);
+                  if (!res.success) {
+                    setLoanFormError(res.error || 'Failed to submit loan application.');
+                    return;
+                  }
                   setShowLoanModal(false);
+                  if (res.dbSynced) {
+                    setLoanFeedback({
+                      type: 'success',
+                      message: `${loanType} of ৳${amount.toLocaleString()} for ${emp.name} saved to Supabase.`,
+                    });
+                  } else if (res.backedUp) {
+                    setLoanFeedback({
+                      type: 'warning',
+                      message:
+                        res.error ||
+                        `${loanType} saved to Supabase backup (system_settings), pending RLS policy fix on public.employee_advances_loans.`,
+                      sqlFix: res.sqlFix,
+                    });
+                  } else {
+                    setLoanFeedback({
+                      type: 'error',
+                      message:
+                        res.error ||
+                        `${loanType} added locally, but could not save to Supabase.`,
+                      sqlFix: res.sqlFix,
+                    });
+                  }
                 }}
-                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs"
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs disabled:opacity-50"
               >
-                Submit Application
+                {isSubmittingLoan ? 'Saving...' : 'Submit Application'}
               </button>
             </div>
           </div>
@@ -5219,9 +5472,29 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 Cancel
               </button>
               <button
-                onClick={() => {
-                  earlySettleAdvanceLoan(settlingLoan.id, payBankName, 'Direct Employee Clearance');
+                type="button"
+                onClick={async () => {
+                  const target = settlingLoan;
+                  const res = await earlySettleAdvanceLoan(
+                    target.id,
+                    payBankName || 'City Bank PLC',
+                    'Direct Employee Clearance'
+                  );
                   setSettlingLoan(null);
+                  if (res?.dbSynced) {
+                    setLoanFeedback({
+                      type: 'success',
+                      message: `Early settlement recorded for ${target.employeeName} and synced to Supabase.`,
+                    });
+                  } else if (res?.backedUp) {
+                    setLoanFeedback({
+                      type: 'warning',
+                      message:
+                        res.error ||
+                        `Early settlement saved via Supabase backup for ${target.employeeName}.`,
+                      sqlFix: res.sqlFix,
+                    });
+                  }
                 }}
                 className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs"
               >

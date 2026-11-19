@@ -220,6 +220,8 @@ import {
   PAYROLL_SETTINGS_TABLE_SQL,
   AttendanceDbStatus,
   EMPLOYEE_ATTENDANCES_TABLE_SQL,
+  AdvanceLoansDbStatus,
+  EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
 } from '../types/payroll.ts';
 import {
   DEFAULT_OFFICE_LOCATIONS,
@@ -862,10 +864,38 @@ interface ERPContextType {
   getEmployeeLeaveBalance: (fieldForceId: string, year?: number) => any;
 
   advanceLoans: AdvanceLoanRecord[];
-  applyAdvanceLoan: (loanData: any) => string;
-  approveAdvanceLoan: (loanId: string, approverName?: string) => void;
+  advanceLoansDbStatus: AdvanceLoansDbStatus;
+  refreshAdvanceLoans?: () => Promise<void>;
+  syncAdvanceLoansToSupabase?: () => Promise<{
+    dbSynced: boolean;
+    backedUp: boolean;
+    syncedCount: number;
+    error?: string;
+    sqlFix?: string;
+  }>;
+  applyAdvanceLoan: (loanData: any) => Promise<{
+    success: boolean;
+    id?: string;
+    dbSynced?: boolean;
+    backedUp?: boolean;
+    error?: string;
+    sqlFix?: string;
+  }>;
+  approveAdvanceLoan: (loanId: string, approverName?: string) => Promise<{
+    success: boolean;
+    dbSynced?: boolean;
+    backedUp?: boolean;
+    error?: string;
+    sqlFix?: string;
+  }>;
   recordLoanInstallmentDeduction: (loanId: string, installmentNumberOrMonth: any, payrollRunIdOrAmount?: any) => void;
-  earlySettleAdvanceLoan: (loanId: string, paymentMethodOrAmount?: any, notes?: string) => void;
+  earlySettleAdvanceLoan: (loanId: string, paymentMethodOrAmount?: any, notes?: string) => Promise<{
+    success: boolean;
+    dbSynced?: boolean;
+    backedUp?: boolean;
+    error?: string;
+    sqlFix?: string;
+  }>;
 
   overtimeRecords: OvertimeRecord[];
   addOvertimeRecord: (ot: any) => string;
@@ -2510,6 +2540,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [leaveRecords, setLeaveRecords] = useState<LeaveRecord[]>([]);
 
   const [advanceLoans, setAdvanceLoans] = useState<AdvanceLoanRecord[]>([]);
+  const [advanceLoansDbStatus, setAdvanceLoansDbStatus] = useState<AdvanceLoansDbStatus>({
+    synced: false,
+    status: 'unknown',
+    error: null,
+    sqlFix: null,
+  });
 
   const [overtimeRecords, setOvertimeRecords] = useState<OvertimeRecord[]>([]);
 
@@ -7196,6 +7232,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       refreshOfficeLocations(),
       refreshAttendanceData(),
       refreshLeaveRecords(),
+      refreshAdvanceLoans(),
       refreshOvertimeData(),
       refreshOffers(),
       refreshSalesOrders(),
@@ -22093,28 +22130,395 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const applyAdvanceLoan = (
+  const classifyAdvanceLoansSupabaseError = (err: any): AdvanceLoansDbStatus => {
+    const code = String(err?.code || '').trim();
+    const message = String(err?.message || '').trim();
+    const lower = message.toLowerCase();
+    if (
+      code === 'PGRST205' ||
+      code === '42P01' ||
+      lower.includes('could not find the table') ||
+      lower.includes('does not exist')
+    ) {
+      return {
+        synced: false,
+        status: 'table_missing',
+        error: 'Supabase table "public.employee_advances_loans" does not exist yet.',
+        sqlFix: EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+      };
+    }
+    if (
+      code === '42501' ||
+      lower.includes('row-level security') ||
+      lower.includes('permission denied')
+    ) {
+      return {
+        synced: false,
+        status: 'rls_blocked',
+        error: `Supabase Row-Level Security blocked saving to "public.employee_advances_loans": ${message}`,
+        sqlFix: EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+      };
+    }
+    return {
+      synced: false,
+      status: 'error',
+      error: message || 'Failed to communicate with Supabase employee_advances_loans table.',
+      sqlFix: EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+    };
+  };
+
+  const mapAdvanceLoanRowToRecord = (row: any): AdvanceLoanRecord => {
+    const principal = Number(row.principal_amount_bdt) || 0;
+    const repaid = Number(row.repaid_amount_bdt) || 0;
+    const remaining =
+      row.remaining_amount_bdt !== undefined && row.remaining_amount_bdt !== null
+        ? Number(row.remaining_amount_bdt)
+        : Math.max(0, principal - repaid);
+    return {
+      id: String(row.id),
+      employeeId: row.employee_id ? String(row.employee_id) : undefined,
+      fieldForceId: row.employee_id ? String(row.employee_id) : undefined,
+      employeeCode: row.employee_code ? String(row.employee_code) : undefined,
+      employeeName: String(row.employee_name || ''),
+      loanType: (row.loan_type || 'Employee Loan') as AdvanceLoanType,
+      principalAmountBDT: principal,
+      repaymentTenureMonths: Math.max(1, Number(row.repayment_tenure_months) || 1),
+      monthlyDeductionBDT: Number(row.monthly_deduction_bdt) || 0,
+      deductionStartMonthYear: String(row.deduction_start_month_year || ''),
+      repaidAmountBDT: repaid,
+      remainingAmountBDT: remaining,
+      purpose: row.purpose ? String(row.purpose) : undefined,
+      status: (row.status || 'Pending') as AdvanceLoanRecord['status'],
+      appliedDate: row.applied_date ? String(row.applied_date) : undefined,
+      approvedBy: row.approved_by ? String(row.approved_by) : undefined,
+      approvalDate: row.approval_date ? String(row.approval_date) : undefined,
+      remarks: row.remarks ? String(row.remarks) : undefined,
+      schedule: Array.isArray(row.schedule_json) ? row.schedule_json : [],
+    };
+  };
+
+  const buildAdvanceLoanUpsertPayload = (loan: AdvanceLoanRecord): Record<string, any> => {
+    const principal = Number(loan.principalAmountBDT ?? loan.approvedAmountBDT ?? loan.requestedAmountBDT ?? 0) || 0;
+    const tenure = Math.max(1, Number(loan.repaymentTenureMonths ?? loan.installmentDurationMonths ?? 1) || 1);
+    const monthly = Number(loan.monthlyDeductionBDT ?? loan.monthlyInstallmentBDT ?? Math.round(principal / tenure)) || 0;
+    const repaid = Number(loan.repaidAmountBDT ?? loan.totalPaidBDT ?? 0) || 0;
+    const remaining = Number(loan.remainingAmountBDT ?? loan.remainingBalanceBDT ?? Math.max(0, principal - repaid));
+    return {
+      id: loan.id,
+      employee_id: loan.employeeId || loan.fieldForceId || '',
+      employee_code: loan.employeeCode || '',
+      employee_name: loan.employeeName || '',
+      loan_type: loan.loanType || loan.type || 'Employee Loan',
+      principal_amount_bdt: principal,
+      repayment_tenure_months: tenure,
+      monthly_deduction_bdt: monthly,
+      deduction_start_month_year:
+        loan.deductionStartMonthYear || loan.repaymentStartMonth || new Date().toISOString().slice(0, 7),
+      repaid_amount_bdt: repaid,
+      remaining_amount_bdt: remaining,
+      purpose: loan.purpose || null,
+      status: loan.status || 'Pending',
+      applied_date: loan.appliedDate || loan.requestDate || new Date().toISOString().slice(0, 10),
+      approved_by: loan.approvedBy || null,
+      approval_date: loan.approvalDate || null,
+      remarks: loan.remarks || null,
+      schedule_json: Array.isArray(loan.schedule) ? loan.schedule : [],
+    };
+  };
+
+  const refreshAdvanceLoans = async () => {
+    const sb = getSupabase();
+    if (!sb) {
+      setAdvanceLoansDbStatus({
+        synced: false,
+        status: 'not_configured',
+        error: 'Supabase client is not configured.',
+        sqlFix: null,
+      });
+      return;
+    }
+    try {
+      const [primaryRes, backupRes] = await Promise.all([
+        sb
+          .from('employee_advances_loans')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(500),
+        sb
+          .from('system_settings')
+          .select('settings_json')
+          .eq('id', 'employee_advances_loans')
+          .maybeSingle(),
+      ]);
+
+      const mergedMap = new Map<string, AdvanceLoanRecord>();
+
+      const backupList = Array.isArray((backupRes.data?.settings_json as any)?.records)
+        ? ((backupRes.data!.settings_json as any).records as AdvanceLoanRecord[])
+        : [];
+      backupList.forEach((rec) => {
+        if (rec?.id) mergedMap.set(rec.id, rec);
+      });
+
+      const primaryRows: AdvanceLoanRecord[] =
+        !primaryRes.error && Array.isArray(primaryRes.data)
+          ? primaryRes.data.filter((r: any) => r?.id).map(mapAdvanceLoanRowToRecord)
+          : [];
+
+      primaryRows.forEach((rec) => {
+        mergedMap.set(rec.id, rec);
+      });
+
+      if (mergedMap.size > 0) {
+        const list = Array.from(mergedMap.values()).sort((a, b) =>
+          (b.appliedDate || b.id || '').localeCompare(a.appliedDate || a.id || '')
+        );
+        setAdvanceLoans(list);
+      }
+
+      if (primaryRes.error) {
+        setAdvanceLoansDbStatus(classifyAdvanceLoansSupabaseError(primaryRes.error));
+      } else if (backupList.length > primaryRows.length) {
+        setAdvanceLoansDbStatus({
+          synced: false,
+          status: 'rls_blocked',
+          error:
+            'Some Advance/Loan records are stored in system_settings backup because direct writes to "public.employee_advances_loans" were blocked by Row-Level Security.',
+          sqlFix: EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+        });
+      } else if (primaryRows.length > 0) {
+        setAdvanceLoansDbStatus({
+          synced: true,
+          status: 'synced',
+          error: null,
+          sqlFix: null,
+        });
+      }
+    } catch (err) {
+      console.warn('refreshAdvanceLoans notice:', err);
+      setAdvanceLoansDbStatus(classifyAdvanceLoansSupabaseError(err));
+    }
+  };
+
+  const persistAdvanceLoansToSupabase = async (
+    recordsToPersist: AdvanceLoanRecord[],
+    snapshotList: AdvanceLoanRecord[]
+  ): Promise<{
+    dbSynced: boolean;
+    backedUp: boolean;
+    syncedCount: number;
+    error?: string;
+    sqlFix?: string;
+  }> => {
+    const sb = getSupabase();
+    if (!sb) {
+      setAdvanceLoansDbStatus({
+        synced: false,
+        status: 'not_configured',
+        error: 'Supabase client is not configured.',
+        sqlFix: null,
+      });
+      return {
+        dbSynced: false,
+        backedUp: false,
+        syncedCount: 0,
+        error: 'Supabase client is not configured.',
+      };
+    }
+
+    const payloads = recordsToPersist.map(buildAdvanceLoanUpsertPayload);
+    try {
+      let lastError: any = null;
+      if (payloads.length > 0) {
+        const { error } = await sb
+          .from('employee_advances_loans')
+          .upsert(payloads, { onConflict: 'id' });
+        lastError = error;
+      }
+
+      if (!lastError) {
+        setAdvanceLoansDbStatus({
+          synced: true,
+          status: 'synced',
+          error: null,
+          sqlFix: null,
+        });
+        try {
+          await sb.from('system_settings').upsert(
+            {
+              id: 'employee_advances_loans',
+              software_name: 'Employee Advances & Loans',
+              logo_data_url: null,
+              branding_json: { type: 'employee_advances_loans' },
+              settings_json: { records: snapshotList.slice(0, 500) },
+              updated_by: currentUser?.name || 'Admin',
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'id' }
+          );
+        } catch {}
+        return {
+          dbSynced: true,
+          backedUp: true,
+          syncedCount: payloads.length,
+        };
+      }
+
+      const primaryStatus = classifyAdvanceLoansSupabaseError(lastError);
+      setAdvanceLoansDbStatus(primaryStatus);
+
+      let backedUp = false;
+      try {
+        const { error: backupErr } = await sb.from('system_settings').upsert(
+          {
+            id: 'employee_advances_loans',
+            software_name: 'Employee Advances & Loans',
+            logo_data_url: null,
+            branding_json: { type: 'employee_advances_loans' },
+            settings_json: { records: snapshotList.slice(0, 500) },
+            updated_by: currentUser?.name || 'Admin',
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'id' }
+        );
+        backedUp = !backupErr;
+      } catch {
+        backedUp = false;
+      }
+
+      return {
+        dbSynced: false,
+        backedUp,
+        syncedCount: 0,
+        error: backedUp
+          ? 'Saved to Supabase backup (system_settings), but Row-Level Security blocked writing directly to "public.employee_advances_loans". Run the SQL fix below once in Supabase SQL Editor, then click Sync to Supabase.'
+          : primaryStatus.error || lastError?.message || 'Failed to save loan to Supabase.',
+        sqlFix: primaryStatus.sqlFix || EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+      };
+    } catch (err: any) {
+      const failStatus = classifyAdvanceLoansSupabaseError(err);
+      setAdvanceLoansDbStatus(failStatus);
+      return {
+        dbSynced: false,
+        backedUp: false,
+        syncedCount: 0,
+        error: failStatus.error || err?.message || 'Network error while saving advance/loan.',
+        sqlFix: failStatus.sqlFix || EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+      };
+    }
+  };
+
+  const syncAdvanceLoansToSupabase = async () => {
+    const sb = getSupabase();
+    const mergedMap = new Map<string, AdvanceLoanRecord>();
+    if (sb) {
+      try {
+        const { data: backupRow } = await sb
+          .from('system_settings')
+          .select('settings_json')
+          .eq('id', 'employee_advances_loans')
+          .maybeSingle();
+        const backupList = Array.isArray((backupRow?.settings_json as any)?.records)
+          ? ((backupRow!.settings_json as any).records as AdvanceLoanRecord[])
+          : [];
+        backupList.forEach((rec) => {
+          if (rec?.id) mergedMap.set(rec.id, rec);
+        });
+      } catch {}
+    }
+    advanceLoans.forEach((rec) => {
+      if (rec?.id) mergedMap.set(rec.id, rec);
+    });
+    const allRecords = Array.from(mergedMap.values());
+    if (allRecords.length === 0) {
+      // Probe table write/read permission cleanly if list is empty
+      if (sb) {
+        const probeId = `probe-loan-${Date.now()}`;
+        const { error: probeErr } = await sb.from('employee_advances_loans').upsert(
+          {
+            id: probeId,
+            employee_id: 'probe',
+            employee_code: 'PROBE',
+            employee_name: 'Probe',
+            loan_type: 'Employee Loan',
+            principal_amount_bdt: 1,
+            repayment_tenure_months: 1,
+            monthly_deduction_bdt: 1,
+            deduction_start_month_year: new Date().toISOString().slice(0, 7),
+            repaid_amount_bdt: 0,
+            remaining_amount_bdt: 1,
+            status: 'Pending',
+          },
+          { onConflict: 'id' }
+        );
+        if (probeErr) {
+          const st = classifyAdvanceLoansSupabaseError(probeErr);
+          setAdvanceLoansDbStatus(st);
+          return {
+            dbSynced: false,
+            backedUp: false,
+            syncedCount: 0,
+            error: st.error || probeErr.message,
+            sqlFix: st.sqlFix || EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+          };
+        }
+        await sb.from('employee_advances_loans').delete().eq('id', probeId);
+      }
+      setAdvanceLoansDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
+      return { dbSynced: true, backedUp: true, syncedCount: 0 };
+    }
+
+    const res = await persistAdvanceLoansToSupabase(allRecords, allRecords);
+    if (res.dbSynced) {
+      await refreshAdvanceLoans();
+    }
+    return res;
+  };
+
+  const applyAdvanceLoan = async (
     loanData: Omit<AdvanceLoanRecord, 'id' | 'appliedDate' | 'status' | 'repaidAmountBDT' | 'remainingAmountBDT' | 'schedule'>
-  ): string => {
+  ): Promise<{
+    success: boolean;
+    id?: string;
+    dbSynced?: boolean;
+    backedUp?: boolean;
+    error?: string;
+    sqlFix?: string;
+  }> => {
     if (!hasPageAction(currentUser, 'payroll', 'create_payroll')) {
       console.warn('Permission denied: create_payroll required to apply for employee advance/loan.');
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to create advance/loan without create_payroll permission`);
-      return '';
+      return {
+        success: false,
+        error: 'Permission denied: Process Monthly Payroll permission is required to apply for an advance/loan.',
+      };
     }
+    const principal = Number(loanData.principalAmountBDT) || 0;
+    const tenure = Math.max(1, Math.floor(Number(loanData.repaymentTenureMonths) || 1));
+    if (principal <= 0) {
+      return {
+        success: false,
+        error: 'Principal loan/advance amount must be greater than 0 BDT.',
+      };
+    }
+
     const id = `loan-${Date.now().toString().slice(-6)}`;
-    const monthlyInstallment = Math.round(loanData.principalAmountBDT / loanData.repaymentTenureMonths);
-    const [startYear, startMonth] = loanData.deductionStartMonthYear.split('-').map(Number);
+    const monthlyInstallment = Math.round(principal / tenure);
+    const startMonthStr = loanData.deductionStartMonthYear || new Date().toISOString().slice(0, 7);
+    const [parsedYear, parsedMonth] = startMonthStr.split('-').map(Number);
+    const startYear = Number.isFinite(parsedYear) && parsedYear > 2000 ? parsedYear : new Date().getFullYear();
+    const startMonth = Number.isFinite(parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12 ? parsedMonth : new Date().getMonth() + 1;
 
     const schedule: LoanInstallmentSchedule[] = [];
-    for (let i = 0; i < loanData.repaymentTenureMonths; i++) {
+    for (let i = 0; i < tenure; i++) {
       const date = new Date(startYear, startMonth - 1 + i, 1);
       const mStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
       schedule.push({
         installmentNumber: i + 1,
         monthYear: mStr,
         amountBDT:
-          i === loanData.repaymentTenureMonths - 1
-            ? loanData.principalAmountBDT - monthlyInstallment * (loanData.repaymentTenureMonths - 1)
+          i === tenure - 1
+            ? principal - monthlyInstallment * (tenure - 1)
             : monthlyInstallment,
         status: 'Scheduled',
       });
@@ -22123,115 +22527,161 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newRecord: AdvanceLoanRecord = {
       ...loanData,
       id,
+      principalAmountBDT: principal,
+      repaymentTenureMonths: tenure,
+      deductionStartMonthYear: `${startYear}-${String(startMonth).padStart(2, '0')}`,
       appliedDate: new Date().toISOString().slice(0, 10),
       status: 'Pending',
       monthlyDeductionBDT: monthlyInstallment,
       repaidAmountBDT: 0,
-      remainingAmountBDT: loanData.principalAmountBDT,
+      remainingAmountBDT: principal,
       schedule,
     };
 
+    const nextList = [newRecord, ...advanceLoans];
     setAdvanceLoans((prev) => [newRecord, ...prev]);
     addAuditLog(
       'LOAN_APPLIED',
       'HR & Payroll',
-      `${loanData.loanType} of ৳${loanData.principalAmountBDT.toLocaleString()} applied by ${loanData.employeeName} (${loanData.repaymentTenureMonths} months tenure @ ৳${monthlyInstallment.toLocaleString()}/mo)`
+      `${loanData.loanType} of ৳${principal.toLocaleString()} applied by ${loanData.employeeName} (${tenure} months tenure @ ৳${monthlyInstallment.toLocaleString()}/mo)`
     );
-    return id;
+
+    const syncRes = await persistAdvanceLoansToSupabase([newRecord], nextList);
+    return {
+      success: true,
+      id,
+      ...syncRes,
+    };
   };
 
-  const approveAdvanceLoan = (id: string, approvedBy: string) => {
+  const approveAdvanceLoan = async (id: string, approvedBy?: string) => {
     if (!hasPageAction(currentUser, 'payroll', 'approve_payroll')) {
       console.warn('Permission denied: approve_payroll required to approve advance/loan.');
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to approve loan (${id}) without approve_payroll permission`);
-      return;
+      return {
+        success: false,
+        error: 'Permission denied: Approve Salary Sheet permission is required to approve loans.',
+      };
     }
+    const approvalDate = new Date().toISOString().slice(0, 10);
+    const approver = approvedBy || currentUser?.name || 'Managing Director';
+    let updatedRecord: AdvanceLoanRecord | null = null;
+    const nextList = advanceLoans.map((l) => {
+      if (l.id === id) {
+        updatedRecord = { ...l, status: 'Approved', approvedBy: approver, approvalDate };
+        return updatedRecord;
+      }
+      return l;
+    });
     setAdvanceLoans((prev) =>
-      prev.map((l) => (l.id === id ? { ...l, status: 'Approved', approvedBy, approvalDate: new Date().toISOString().slice(0, 10) } : l))
+      prev.map((l) => (l.id === id ? { ...l, status: 'Approved', approvedBy: approver, approvalDate } : l))
     );
-    addAuditLog('LOAN_APPROVED', 'HR & Payroll', `Approved loan ID ${id} by ${approvedBy}`);
+    addAuditLog('LOAN_APPROVED', 'HR & Payroll', `Approved loan ID ${id} by ${approver}`);
+    if (updatedRecord) {
+      const syncRes = await persistAdvanceLoansToSupabase([updatedRecord], nextList);
+      return { success: true, ...syncRes };
+    }
+    return { success: true };
   };
 
   const recordLoanInstallmentDeduction = (loanId: string, installmentNumber: number, payrollRunId: string) => {
+    let updatedRecord: AdvanceLoanRecord | null = null;
+    const nextList = advanceLoans.map((l) => {
+      if (l.id === loanId) {
+        let deductedAmt = 0;
+        const newSchedule = l.schedule.map((s) => {
+          if (s.installmentNumber === installmentNumber && s.status !== 'Deducted') {
+            deductedAmt = s.amountBDT || s.installmentAmountBDT || 0;
+            return {
+              ...s,
+              status: 'Deducted' as const,
+              deductedInPayrollId: payrollRunId,
+              paidDate: new Date().toISOString().slice(0, 10),
+            };
+          }
+          return s;
+        });
+        const newRepaid = (l.repaidAmountBDT || 0) + deductedAmt;
+        const newRemaining = Math.max(0, (l.principalAmountBDT || 0) - newRepaid);
+        const isFullyPaid = newRemaining === 0;
+        updatedRecord = {
+          ...l,
+          repaidAmountBDT: newRepaid,
+          remainingAmountBDT: newRemaining,
+          status: isFullyPaid ? 'Closed' : l.status,
+          schedule: newSchedule,
+        };
+        return updatedRecord;
+      }
+      return l;
+    });
     setAdvanceLoans((prev) =>
-      prev.map((l) => {
-        if (l.id === loanId) {
-          let deductedAmt = 0;
-          const newSchedule = l.schedule.map((s) => {
-            if (s.installmentNumber === installmentNumber && s.status !== 'Deducted') {
-              deductedAmt = s.amountBDT;
-              return {
-                ...s,
-                status: 'Deducted' as const,
-                deductedInPayrollId: payrollRunId,
-                paidDate: new Date().toISOString().slice(0, 10),
-              };
-            }
-            return s;
-          });
-          const newRepaid = l.repaidAmountBDT + deductedAmt;
-          const newRemaining = Math.max(0, l.principalAmountBDT - newRepaid);
-          const isFullyPaid = newRemaining === 0;
-          return {
-            ...l,
-            repaidAmountBDT: newRepaid,
-            remainingAmountBDT: newRemaining,
-            status: isFullyPaid ? 'Closed' : l.status,
-            schedule: newSchedule,
-          };
-        }
-        return l;
-      })
+      prev.map((l) => (l.id === loanId && updatedRecord ? updatedRecord : l))
     );
+    if (updatedRecord) {
+      void persistAdvanceLoansToSupabase([updatedRecord], nextList);
+    }
   };
 
-  const earlySettleAdvanceLoan = (id: string, paymentMethod: string, notes?: string) => {
+  const earlySettleAdvanceLoan = async (id: string, paymentMethod: string, notes?: string) => {
     if (!hasPageAction(currentUser, 'payroll', 'disburse')) {
       console.warn('Permission denied: disburse required to settle employee advance/loan.');
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted early loan settlement (${id}) without disburse permission`);
-      return;
+      return {
+        success: false,
+        error: 'Permission denied: Disburse Salary Payments permission is required to settle loans.',
+      };
     }
+    const today = new Date().toISOString().slice(0, 10);
+    let updatedRecord: AdvanceLoanRecord | null = null;
+    const nextList = advanceLoans.map((l) => {
+      if (l.id === id) {
+        const settlementAmount = l.remainingAmountBDT ?? l.remainingBalanceBDT ?? 0;
+        const updatedSchedule = l.schedule.map((s) => ({
+          ...s,
+          status: s.status === 'Scheduled' ? ('Deducted' as const) : s.status,
+          paidDate: s.paidDate || today,
+        }));
+
+        // Post cash book inflow
+        const lastCash = cashBook[cashBook.length - 1];
+        const prevBal = lastCash ? lastCash.runningBalanceBDT : 10000000;
+        const cashEntry: CashBookEntry = {
+          id: `cash-ln-${Date.now()}`,
+          date: today,
+          voucherNo: `CB-LN-${Date.now().toString().slice(-4)}`,
+          accountType: (paymentMethod as any) || 'City Bank PLC',
+          transactionCategory: 'Other Receipt',
+          description: `Early loan settlement: ${l.loanType} for ${l.employeeName} (${l.employeeCode})`,
+          reference: `LOAN-${l.id}`,
+          cashInBDT: settlementAmount,
+          cashOutBDT: 0,
+          runningBalanceBDT: prevBal + settlementAmount,
+        };
+        setCashBook((cb) => [...cb, cashEntry]);
+
+        updatedRecord = {
+          ...l,
+          repaidAmountBDT: l.principalAmountBDT,
+          remainingAmountBDT: 0,
+          status: 'Settled',
+          remarks: `${l.remarks || ''} [Early settled ৳${settlementAmount.toLocaleString()} via ${paymentMethod} on ${today} ${notes || ''}]`.trim(),
+          schedule: updatedSchedule,
+        };
+        return updatedRecord;
+      }
+      return l;
+    });
+
     setAdvanceLoans((prev) =>
-      prev.map((l) => {
-        if (l.id === id) {
-          const today = new Date().toISOString().slice(0, 10);
-          const settlementAmount = l.remainingAmountBDT;
-          const updatedSchedule = l.schedule.map((s) => ({
-            ...s,
-            status: s.status === 'Scheduled' ? ('Deducted' as const) : s.status,
-            paidDate: s.paidDate || today,
-          }));
-
-          // Post cash book inflow
-          const lastCash = cashBook[cashBook.length - 1];
-          const prevBal = lastCash ? lastCash.runningBalanceBDT : 10000000;
-          const cashEntry: CashBookEntry = {
-            id: `cash-ln-${Date.now()}`,
-            date: today,
-            voucherNo: `CB-LN-${Date.now().toString().slice(-4)}`,
-            accountType: (paymentMethod as any) || 'City Bank PLC',
-            transactionCategory: 'Other Receipt',
-            description: `Early loan settlement: ${l.loanType} for ${l.employeeName} (${l.employeeCode})`,
-            reference: `LOAN-${l.id}`,
-            cashInBDT: settlementAmount,
-            cashOutBDT: 0,
-            runningBalanceBDT: prevBal + settlementAmount,
-          };
-          setCashBook((cb) => [...cb, cashEntry]);
-
-          return {
-            ...l,
-            repaidAmountBDT: l.principalAmountBDT,
-            remainingAmountBDT: 0,
-            status: 'Settled',
-            remarks: `${l.remarks || ''} [Early settled ৳${settlementAmount.toLocaleString()} via ${paymentMethod} on ${today} ${notes || ''}]`.trim(),
-            schedule: updatedSchedule,
-          };
-        }
-        return l;
-      })
+      prev.map((l) => (l.id === id && updatedRecord ? updatedRecord : l))
     );
     addAuditLog('LOAN_EARLY_SETTLED', 'HR & Payroll', `Early settled loan ${id}`);
+    if (updatedRecord) {
+      const syncRes = await persistAdvanceLoansToSupabase([updatedRecord], nextList);
+      return { success: true, ...syncRes };
+    }
+    return { success: true };
   };
 
   const addOvertimeRecord = (ot: Omit<OvertimeRecord, 'id' | 'status'>): string => {
@@ -23673,46 +24123,58 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const run = targetRun;
 
       // Update loans installments that were deducted in this run
-      run.items.forEach((item) => {
-        if (item.advanceLoanDeductionBDT > 0) {
-          setAdvanceLoans((loans) =>
-            loans.map((loan) => {
-              if (
-                loan.employeeId === item.employeeId &&
-                (loan.status === 'Approved' || loan.status === 'Active') &&
-                loan.remainingAmountBDT > 0
-              ) {
-                const schedIndex = loan.schedule.findIndex(
-                  (s) => s.monthYear === run.monthYear && s.status === 'Scheduled'
-                );
-                const deductedAmt = schedIndex !== -1 ? loan.schedule[schedIndex].amountBDT : item.advanceLoanDeductionBDT;
-                const newRepaid = loan.repaidAmountBDT + deductedAmt;
-                const newRemaining = Math.max(0, loan.principalAmountBDT - newRepaid);
-
-                const newSched = loan.schedule.map((s, idx) =>
-                  idx === schedIndex || (schedIndex === -1 && idx === 0 && s.status === 'Scheduled')
-                    ? {
-                        ...s,
-                        status: 'Deducted' as const,
-                        deductedInPayrollId: runId,
-                        paidDate: new Date().toISOString().slice(0, 10),
-                      }
-                    : s
-                );
-
-                return {
-                  ...loan,
-                  repaidAmountBDT: newRepaid,
-                  remainingAmountBDT: newRemaining,
-                  status: newRemaining === 0 ? ('Closed' as const) : ('Active' as const),
-                  schedule: newSched,
-                };
-              }
-              return loan;
-            })
+      const deductedEmpIds = new Set(
+        run.items.filter((i) => i.advanceLoanDeductionBDT > 0).map((i) => i.employeeId)
+      );
+      if (deductedEmpIds.size > 0) {
+        const updatedLoansList: AdvanceLoanRecord[] = [];
+        const touchedLoans: AdvanceLoanRecord[] = [];
+        advanceLoans.forEach((loan) => {
+          const matchedItem = run.items.find(
+            (item) =>
+              item.advanceLoanDeductionBDT > 0 &&
+              loan.employeeId === item.employeeId &&
+              (loan.status === 'Approved' || loan.status === 'Active') &&
+              (loan.remainingAmountBDT ?? 0) > 0
           );
+          if (matchedItem) {
+            const schedIndex = loan.schedule.findIndex(
+              (s) => s.monthYear === run.monthYear && s.status === 'Scheduled'
+            );
+            const deductedAmt =
+              schedIndex !== -1
+                ? loan.schedule[schedIndex].amountBDT || loan.schedule[schedIndex].installmentAmountBDT || 0
+                : matchedItem.advanceLoanDeductionBDT;
+            const newRepaid = (loan.repaidAmountBDT || 0) + deductedAmt;
+            const newRemaining = Math.max(0, (loan.principalAmountBDT || 0) - newRepaid);
+            const newSched = loan.schedule.map((s, idx) =>
+              idx === schedIndex || (schedIndex === -1 && idx === 0 && s.status === 'Scheduled')
+                ? {
+                    ...s,
+                    status: 'Deducted' as const,
+                    deductedInPayrollId: runId,
+                    paidDate: new Date().toISOString().slice(0, 10),
+                  }
+                : s
+            );
+            const updatedLoan: AdvanceLoanRecord = {
+              ...loan,
+              repaidAmountBDT: newRepaid,
+              remainingAmountBDT: newRemaining,
+              status: newRemaining === 0 ? ('Closed' as const) : ('Active' as const),
+              schedule: newSched,
+            };
+            updatedLoansList.push(updatedLoan);
+            touchedLoans.push(updatedLoan);
+          } else {
+            updatedLoansList.push(loan);
+          }
+        });
+        if (touchedLoans.length > 0) {
+          setAdvanceLoans(updatedLoansList);
+          void persistAdvanceLoansToSupabase(touchedLoans, updatedLoansList);
         }
-      });
+      }
 
       // Post double-entry journal entry record in audit logs
       addAuditLog(
@@ -24638,6 +25100,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         recordRejectedAttendanceAttempt,
         leaveRecords,
         advanceLoans,
+        advanceLoansDbStatus,
+        refreshAdvanceLoans,
+        syncAdvanceLoansToSupabase,
         overtimeRecords,
         bonusRecords,
         monthlyPayrollRuns,

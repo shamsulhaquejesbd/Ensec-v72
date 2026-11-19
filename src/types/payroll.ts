@@ -706,3 +706,43 @@ CREATE POLICY "Allow public all employee_attendances" ON public.employee_attenda
 
 GRANT ALL ON public.employee_attendances TO postgres, anon, authenticated, service_role;`;
 
+export interface AdvanceLoansDbStatus {
+  synced: boolean;
+  status: 'synced' | 'rls_blocked' | 'table_missing' | 'error' | 'not_configured' | 'unknown';
+  error?: string | null;
+  sqlFix?: string | null;
+}
+
+export const EMPLOYEE_ADVANCES_LOANS_TABLE_SQL = `-- Run this in your Supabase SQL Editor to enable saving Employee Advances & Loans directly to employee_advances_loans:
+CREATE TABLE IF NOT EXISTS public.employee_advances_loans (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT NOT NULL,
+  employee_code TEXT NOT NULL DEFAULT '',
+  employee_name TEXT NOT NULL,
+  loan_type TEXT NOT NULL DEFAULT 'Employee Loan',
+  principal_amount_bdt NUMERIC(14, 2) NOT NULL,
+  repayment_tenure_months INT NOT NULL DEFAULT 6,
+  monthly_deduction_bdt NUMERIC(14, 2) NOT NULL,
+  deduction_start_month_year TEXT NOT NULL,
+  repaid_amount_bdt NUMERIC(14, 2) DEFAULT 0.00,
+  remaining_amount_bdt NUMERIC(14, 2) NOT NULL,
+  purpose TEXT,
+  status TEXT NOT NULL DEFAULT 'Pending',
+  applied_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  approved_by TEXT,
+  approval_date DATE,
+  remarks TEXT,
+  schedule_json JSONB DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_emp_loans_empid ON public.employee_advances_loans(employee_id);
+
+ALTER TABLE public.employee_advances_loans ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public all employee_advances_loans" ON public.employee_advances_loans;
+CREATE POLICY "Allow public all employee_advances_loans" ON public.employee_advances_loans FOR ALL USING (true) WITH CHECK (true);
+
+GRANT ALL ON public.employee_advances_loans TO postgres, anon, authenticated, service_role;`;
+
+
