@@ -205,8 +205,13 @@ input[type="number"] {
 
   body.printing-qr-badges {
     background: #ffffff !important;
+    color: #0f172a !important;
     margin: 0 !important;
     padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
   }
   body.printing-qr-badges > *:not(#qr-badges-a4-print-portal) {
     display: none !important;
@@ -214,22 +219,28 @@ input[type="number"] {
   body.printing-qr-badges #qr-badges-a4-print-portal {
     display: block !important;
     position: static !important;
+    left: auto !important;
+    top: auto !important;
     width: 100% !important;
+    height: auto !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
     margin: 0 !important;
     padding: 0 !important;
     overflow: visible !important;
     box-shadow: none !important;
     background: #ffffff !important;
     color: #0f172a !important;
-    page: qr-badges-a4;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
   body.printing-qr-badges #qr-badges-a4-print-portal * {
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
   body.printing-qr-badges .qr-a4-sheet {
+    display: block !important;
     width: 100% !important;
     margin: 0 !important;
     padding: 0 !important;
@@ -239,10 +250,16 @@ input[type="number"] {
     background: #ffffff !important;
     break-after: page;
     page-break-after: always;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
   body.printing-qr-badges .qr-a4-sheet:last-child {
     break-after: auto;
     page-break-after: auto;
+  }
+  body.printing-qr-badges .qr-id-card-print {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 }
 

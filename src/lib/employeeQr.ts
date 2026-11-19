@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import JSZip from 'jszip';
+import jsPDF from 'jspdf';
 import type { FieldForceRep } from '../types/erp';
 import { getSupabaseUrl } from './supabase';
 
@@ -421,5 +422,79 @@ export async function downloadBulkEmployeeQrZip(
   const zipBlob = await zip.generateAsync({ type: 'blob' });
   const todayStr = new Date().toISOString().slice(0, 10);
   triggerBlobDownload(zipBlob, `ensec_employee_qr_codes_${todayStr}.zip`);
+  return processed;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image blob.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+export async function downloadBulkEmployeeQrA4Pdf(
+  employees: FieldForceRep[],
+  tokensById: EmployeeQrTokenMap,
+  companyName?: string,
+  onProgress?: (done: number, total: number) => void
+): Promise<number> {
+  const pdf = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+
+  const cols = 3;
+  const rows = 3;
+  const perPage = cols * rows;
+  const marginX = 8;
+  const marginY = 8;
+  const gapX = 5;
+  const gapY = 5;
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const maxCardW = (pageW - marginX * 2 - gapX * (cols - 1)) / cols;
+  const maxCardH = (pageH - marginY * 2 - gapY * (rows - 1)) / rows;
+  // Match 640:840 portrait card aspect ratio cleanly inside each cell
+  const aspect = 640 / 840;
+  let cardW = maxCardW;
+  let cardH = cardW / aspect;
+  if (cardH > maxCardH) {
+    cardH = maxCardH;
+    cardW = cardH * aspect;
+  }
+  const cellW = (pageW - marginX * 2 - gapX * (cols - 1)) / cols;
+  const xPadInsideCell = (cellW - cardW) / 2;
+
+  let processed = 0;
+  const validEmps = employees.filter((e) => Boolean(tokensById[e.id]));
+  const total = validEmps.length;
+
+  for (let i = 0; i < validEmps.length; i++) {
+    const emp = validEmps[i];
+    const token = tokensById[emp.id];
+    const pageIndex = Math.floor(i / perPage);
+    const indexOnPage = i % perPage;
+    if (pageIndex > 0 && indexOnPage === 0) {
+      pdf.addPage('a4', 'portrait');
+    }
+    const col = indexOnPage % cols;
+    const row = Math.floor(indexOnPage / cols);
+    const x = marginX + col * (cellW + gapX) + xPadInsideCell;
+    const y = marginY + row * (cardH + gapY);
+
+    const blob = await renderEmployeeQrBadgePngBlob(emp, token, companyName);
+    const dataUrl = await blobToDataUrl(blob);
+    pdf.addImage(dataUrl, 'PNG', x, y, cardW, cardH, undefined, 'FAST');
+
+    processed += 1;
+    onProgress?.(processed, total);
+  }
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  pdf.save(`ensec_employee_qr_cards_a4_${todayStr}.pdf`);
   return processed;
 }
