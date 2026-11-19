@@ -22028,22 +22028,48 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const applyLeave = (leave: Omit<LeaveRecord, 'id' | 'appliedAt' | 'status'>): string => {
+    const canSelectAnyEmployee =
+      currentUser?.role === 'Super Admin' ||
+      hasPageAction(currentUser, 'payroll', 'create_payroll');
     const canSubmitLeave =
-      hasPageAction(currentUser, 'payroll', 'create_payroll') ||
+      canSelectAnyEmployee ||
+      hasPageAction(currentUser, 'payroll', 'view_leaves') ||
       hasPageAction(currentUser, 'mobile-field', 'view') ||
       hasPageAction(currentUser, 'mobile-field', 'create');
     if (!canSubmitLeave) {
-      console.warn('Permission denied: create_payroll or mobile-field access required to apply leave.');
+      console.warn('Permission denied: Leaves page permission, create_payroll, or mobile-field access required to apply leave.');
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to apply leave without permission`);
       return '';
     }
     const id = `leave-${Date.now().toString().slice(-6)}`;
+    const resolvedSelfId = currentEmployeeProfile?.employeeId || currentUser?.id;
+    const resolvedSelfCode =
+      currentEmployeeProfile?.employeeCode ||
+      currentUser?.salesmanCode ||
+      currentUser?.userId ||
+      currentUser?.id;
+    const resolvedSelfName = currentEmployeeProfile?.name || currentUser?.name || leave.employeeName;
+    const resolvedSelfDept = currentEmployeeProfile?.department || currentUser?.department || leave.department;
+
     const newLeave: LeaveRecord = {
       ...leave,
       id,
-      userId: leave.userId || currentUser?.id,
-      employeeId: leave.employeeId || currentEmployeeProfile?.employeeId,
-      employeeCode: leave.employeeCode || currentEmployeeProfile?.employeeCode,
+      userId: canSelectAnyEmployee ? leave.userId || currentUser?.id : currentUser?.id,
+      employeeId: canSelectAnyEmployee
+        ? leave.employeeId || resolvedSelfId
+        : resolvedSelfId,
+      fieldForceId: canSelectAnyEmployee
+        ? leave.fieldForceId || leave.employeeId || resolvedSelfId
+        : resolvedSelfId,
+      employeeCode: canSelectAnyEmployee
+        ? leave.employeeCode || resolvedSelfCode
+        : resolvedSelfCode,
+      employeeName: canSelectAnyEmployee
+        ? leave.employeeName || resolvedSelfName
+        : resolvedSelfName,
+      department: canSelectAnyEmployee
+        ? leave.department || resolvedSelfDept
+        : resolvedSelfDept,
       appliedAt: new Date().toISOString(),
       status: 'Pending',
     };
@@ -22053,7 +22079,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addAuditLog(
       'LEAVE_APPLIED',
       'HR & Payroll',
-      `${leave.employeeName} applied for ${leave.leaveType} (${leave.daysCount} days: ${leave.startDate} to ${leave.endDate})`
+      `${newLeave.employeeName} applied for ${newLeave.leaveType} (${newLeave.daysCount} days: ${newLeave.startDate} to ${newLeave.endDate})`
     );
     return id;
   };
