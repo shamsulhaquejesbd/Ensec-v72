@@ -27,7 +27,6 @@ import {
   ChevronDown,
   Filter,
   Upload,
-  Camera,
   ShieldCheck,
   Car,
   PlusCircle,
@@ -144,9 +143,9 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
   const [crmEmail, setCrmEmail] = useState<string>('');
   const [crmChannel, setCrmChannel] = useState<string>('Corporate Fleet');
   const [crmStage, setCrmStage] = useState<string>('Lead Identified');
-  const [crmExpectedVolume, setCrmExpectedVolume] = useState<number>(50);
-  const [crmDealValue, setCrmDealValue] = useState<number>(1250000);
-  const [crmSpecialDiscount, setCrmSpecialDiscount] = useState<number>(5);
+  const [crmExpectedVolume, setCrmExpectedVolume] = useState<number>(0);
+  const [crmDealValue, setCrmDealValue] = useState<number>(0);
+  const [crmSpecialDiscount, setCrmSpecialDiscount] = useState<number>(0);
   const [crmContractTerm, setCrmContractTerm] = useState<number>(12);
   const [crmClosingDate, setCrmClosingDate] = useState<string>(
     new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().substring(0, 10)
@@ -299,12 +298,31 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
     };
   }, [resolvedProfile, currentUser, officeLocations]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    [
+      'ensec_field_force_reps',
+      'ensec_visit_logs',
+      'ensec_sales_orders',
+      'ensec_tada_list',
+      'ensec_mobile_cart',
+      'ensec_mobile_schemes',
+      'ensec_mobile_selected_customer',
+      'ensec_mobile_selected_market',
+    ].forEach((k) => {
+      try { localStorage.removeItem(k); } catch {}
+      try { sessionStorage.removeItem(k); } catch {}
+    });
+  }, []);
+
   // Selected Retailer / Customer state
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>(
     customers[0]?.id || ''
   );
   useEffect(() => {
-    if (!selectedCustomerId && customers[0]?.id) {
+    if (selectedCustomerId && !customers.some((c) => c.id === selectedCustomerId)) {
+      setSelectedCustomerId(customers[0]?.id || '');
+    } else if (!selectedCustomerId && customers[0]?.id) {
       setSelectedCustomerId(customers[0].id);
     }
   }, [customers, selectedCustomerId]);
@@ -319,9 +337,9 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
         channel: 'Retailer',
         customerType: 'Retailer',
         pricingTier: 'Dealer',
-        area: safeProfile.area || safeProfile.territory || 'Assigned Market',
-        market: safeProfile.territory || safeProfile.area || 'Assigned Market',
-        assignedDistributorName: distributors[0]?.name || 'Assigned Distributor',
+        area: safeProfile.area || safeProfile.territory || '',
+        market: safeProfile.territory || safeProfile.area || '',
+        assignedDistributorName: distributors[0]?.name || '',
         phone: '',
         address: safeProfile.officeAddress || '',
       }
@@ -330,7 +348,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
 
   // Selected Market / Beat
   const [selectedMarket, setSelectedMarket] = useState<string>(
-    () => safeProfile.territory || customers[0]?.territory || safeProfile.area || 'Primary Beat'
+    () => safeProfile.territory || customers[0]?.territory || safeProfile.area || ''
   );
   useEffect(() => {
     if (resolvedProfile?.territory) {
@@ -413,33 +431,42 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
     });
   }, [customers, customerSearch, customerChannelFilter, customerDistributorFilter, distributors]);
 
-  // Available markets list
+  // Available markets list (strictly from real profile, customers, and distributors)
   const availableMarkets = useMemo(() => {
     const set = new Set<string>();
     if (selectedMarket) set.add(selectedMarket);
+    if (safeProfile.territory) set.add(safeProfile.territory);
+    if (safeProfile.area) set.add(safeProfile.area);
+    if (safeProfile.region) set.add(safeProfile.region);
     customers.forEach((c) => {
       if (c.territory) set.add(c.territory);
       if (c.market) set.add(c.market);
       if (c.district) set.add(c.district);
     });
-    ['Kadamtoly Doria', 'Mirpur 1', 'Mirpur 10', 'Pallabi', 'Uttara', 'Dhanmondi', 'Mohammadpur', 'Bancharampur'].forEach(
-      (m) => set.add(m)
-    );
+    distributors.forEach((d) => {
+      if (d.territory) set.add(d.territory);
+      if (d.region) set.add(d.region);
+      if (d.dbPoint) set.add(d.dbPoint);
+      if (d.district) set.add(d.district);
+    });
     const q = marketSearch.trim().toLowerCase();
-    return Array.from(set).filter((m) => !q || m.toLowerCase().includes(q));
-  }, [customers, selectedMarket, marketSearch]);
+    return Array.from(set).filter((m) => m && (!q || m.toLowerCase().includes(q)));
+  }, [customers, distributors, safeProfile.territory, safeProfile.area, safeProfile.region, selectedMarket, marketSearch]);
+
+  // Active Promotional Offers from ERP master (no hardcoded test schemes)
+  const activeOffers = useMemo(() => {
+    return offers.filter((o) => {
+      if (o.isActive === false) return false;
+      if (o.status && o.status !== 'Active') return false;
+      return true;
+    });
+  }, [offers]);
 
   // Product Cart State: { [productId]: quantity }
-  const [cart, setCart] = useState<{ [productId: string]: number }>({
-    'prod-1': 2,
-    'prod-2': 1,
-  });
+  const [cart, setCart] = useState<{ [productId: string]: number }>({});
 
   // Applied Discounts checkboxes state
-  const [enabledSchemes, setEnabledSchemes] = useState<{ [schemeId: string]: boolean }>({
-    'scheme-1': true,
-    'scheme-2': true,
-  });
+  const [enabledSchemes, setEnabledSchemes] = useState<{ [schemeId: string]: boolean }>({});
 
   // Success notifications
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
@@ -490,20 +517,26 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
   // TADA CAPTURE STATE
   // -------------------------------------------------------------
   const [tadaDate, setTadaDate] = useState<string>(todayDateNowISO);
-  const [tadaFrom, setTadaFrom] = useState<string>(() => safeProfile.assignedOfficeName || 'Assigned Office');
-  const [tadaTo, setTadaTo] = useState<string>(() => activeCustomer.name || '');
+  const [tadaFrom, setTadaFrom] = useState<string>(() => safeProfile.assignedOfficeName || '');
+  const [tadaTo, setTadaTo] = useState<string>(() =>
+    activeCustomer.id !== 'cust-unselected' ? activeCustomer.name || '' : ''
+  );
   const [tadaMode, setTadaMode] = useState<string>('Bus');
-  const [tadaDistance, setTadaDistance] = useState<number>(8);
-  const [tadaFare, setTadaFare] = useState<number>(30);
+  const [tadaDistance, setTadaDistance] = useState<number>(0);
+  const [tadaFare, setTadaFare] = useState<number>(0);
   const [tadaDA, setTadaDA] = useState<number>(0);
-  const [tadaRemarks, setTadaRemarks] = useState<string>('Regular Retailer Order Booking Visit');
+  const [tadaRemarks, setTadaRemarks] = useState<string>('');
 
   // -------------------------------------------------------------
   // WARRANTY RMA CAPTURE STATE
   // -------------------------------------------------------------
   const [warrantySerial, setWarrantySerial] = useState<string>('');
-  const [warrantyCustName, setWarrantyCustName] = useState<string>(() => activeCustomer.name || '');
-  const [warrantyPhone, setWarrantyPhone] = useState<string>(() => activeCustomer.phone || '');
+  const [warrantyCustName, setWarrantyCustName] = useState<string>(() =>
+    activeCustomer.id !== 'cust-unselected' ? activeCustomer.name || '' : ''
+  );
+  const [warrantyPhone, setWarrantyPhone] = useState<string>(() =>
+    activeCustomer.id !== 'cust-unselected' ? activeCustomer.phone || '' : ''
+  );
   const [warrantyDefect, setWarrantyDefect] = useState<string>('Cell Imbalance / Under Voltage');
   const [warrantyNotes, setWarrantyNotes] = useState<string>('');
 
@@ -813,14 +846,33 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       }
     });
 
-    // Calculate applied discounts based on schemes
+    // Calculate applied discounts strictly from real enabled ERP offers
     let lineDiscount = 0;
-    if (enabledSchemes['scheme-1'] && totalQty >= 2) {
-      lineDiscount += 50 * totalQty; // ৳50 per unit volume scheme
-    }
-    if (enabledSchemes['scheme-2'] && grossTP >= 5000) {
-      lineDiscount += Math.round(grossTP * 0.03); // 3% Trade scheme
-    }
+    const appliedOffersList: Array<{ id: string; title: string; discountBDT: number }> = [];
+    activeOffers.forEach((offer) => {
+      if (!enabledSchemes[offer.id]) return;
+      const minQty = Number(offer.minQuantity || 0);
+      const minVal = Number(offer.minOrderValueBDT || offer.greaterThanOrEqualTo || 0);
+      if (minQty > 0 && totalQty < minQty) return;
+      if (minVal > 0 && grossTP < minVal) return;
+
+      let amt = 0;
+      const pct = Number(offer.discountPercentage || (offer.discountType === 'Percentage' ? offer.discountValue : 0) || 0);
+      const flat = Number(offer.flatDiscountBDT || (offer.discountType === 'Fixed Amount' ? offer.discountValue : 0) || 0);
+      if (pct > 0) {
+        amt = Math.round((grossTP * pct) / 100);
+      } else if (flat > 0) {
+        amt = offer.applyInMultiples ? flat * totalQty : flat;
+      }
+      if (amt > 0) {
+        lineDiscount += amt;
+        appliedOffersList.push({
+          id: offer.id,
+          title: offer.title || offer.discountTitle || offer.code || 'Promotional Offer',
+          discountBDT: amt,
+        });
+      }
+    });
 
     const netTP = Math.max(0, grossTP - lineDiscount);
     const vat = Math.round(netTP * 0.05); // 5% VAT
@@ -828,6 +880,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
 
     return {
       itemsList,
+      appliedOffersList,
       totalLineItems: itemsList.length,
       totalQty,
       grossTP,
@@ -836,7 +889,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       vat,
       netPayable,
     };
-  }, [cart, products, activeCustomer, enabledSchemes]);
+  }, [cart, products, activeCustomer, enabledSchemes, activeOffers]);
 
   // Authenticated Mobile Backend Sync Helper (stamps session headers & enforces logout on 401)
   const postAuthenticatedMobileApi = useCallback(
@@ -973,13 +1026,18 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
 
   // Handle Save Order (Capture retailer-wise tied to logged-in ERP user/employee)
   const handleSaveOrder = async () => {
+    if (!selectedCustomerId || activeCustomer.id === 'cust-unselected') {
+      setBannerNotice('⚠️ Please select a Customer / Outlet before saving an order.');
+      setShowCustomerModal(true);
+      return;
+    }
     if (cartSummary.itemsList.length === 0) {
       setBannerNotice('⚠️ Please add at least one product before saving.');
       return;
     }
 
-    const warehouseId = warehouses[0]?.id || 'wh-1';
-    const warehouseName = warehouses[0]?.name || safeProfile.assignedOfficeName || 'Central Hub';
+    const warehouseId = warehouses[0]?.id || '';
+    const warehouseName = warehouses[0]?.name || safeProfile.assignedOfficeName || '';
     const todayStr = new Date().toISOString().substring(0, 10);
     const nowTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const coords = await getBestAvailableCoords();
@@ -987,8 +1045,8 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
     createSalesOrder({
       date: todayStr,
       channel: activeCustomer.channel || 'Retailer',
-      distributorId: activeCustomer.assignedDistributorId || distributors[0]?.id || 'dist-1',
-      distributorName: activeCustomer.assignedDistributorName || distributors[0]?.name || 'Assigned Distributor',
+      distributorId: activeCustomer.assignedDistributorId || distributors[0]?.id || '',
+      distributorName: activeCustomer.assignedDistributorName || distributors[0]?.name || '',
       customerId: activeCustomer.id,
       customerName: activeCustomer.name,
       userId: safeProfile.userId,
@@ -1006,7 +1064,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
         discountBDT: Math.round(cartSummary.lineDiscount / cartSummary.itemsList.length),
         lineTotalBDT: item.lineTotal,
       })),
-      appliedOfferCode: enabledSchemes['scheme-1'] ? 'Volume Trade Discount - ৳50/unit' : '',
+      appliedOfferCode: cartSummary.appliedOffersList.map((o) => o.title).join(', '),
       offerSavingsBDT: cartSummary.lineDiscount,
       subTotalBDT: cartSummary.grossTP,
       taxVatBDT: cartSummary.vat,
@@ -1142,13 +1200,13 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       channel: 'Distributor Sales',
       customerType: 'Retailer',
       pricingTier: 'Dealer / Retailer Channel',
-      assignedDistributorId: distributors[0]?.id || 'dist-1',
-      assignedDistributorName: newCustDistributor || distributors[0]?.name || 'Assigned Distributor',
+      assignedDistributorId: distributors[0]?.id || '',
+      assignedDistributorName: newCustDistributor || distributors[0]?.name || '',
       assignedSalespersonId: safeProfile.employeeId,
       assignedSalespersonName: safeProfile.name,
       creditLimitBDT: 50000,
-      district: safeProfile.area || 'Dhaka',
-      territory: newCustMarket || safeProfile.territory || 'Assigned Market',
+      district: safeProfile.area || '',
+      territory: newCustMarket || safeProfile.territory || '',
       status: 'Active',
       address: newCustAddress || newCustMarket,
     });
@@ -1167,7 +1225,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       customerType: 'Retailer',
       pricingTier: 'Dealer / Retailer Channel',
       assignedDistributorName: newCustDistributor,
-      territory: newCustMarket || safeProfile.territory || 'Assigned Market',
+      territory: newCustMarket || safeProfile.territory || '',
       address: newCustAddress || newCustMarket,
     });
 
@@ -1194,7 +1252,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       ffCode: safeProfile.employeeCode,
       ffName: safeProfile.name,
       tranDate: tadaDate,
-      distributorName: activeCustomer.assignedDistributorName || distributors[0]?.name || 'Assigned Distributor',
+      distributorName: activeCustomer.assignedDistributorName || distributors[0]?.name || '',
       routeName: activeCustomer.territory || selectedMarket || safeProfile.territory,
       fromAddress: tadaFrom,
       toAddress: tadaTo,
@@ -1237,6 +1295,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       return;
     }
     const newTicketNo = `W-MOB-${Date.now().toString().slice(-4)}`;
+    const primaryProduct = products[0];
     addWarrantyTicket({
       userId: safeProfile.userId,
       employeeId: safeProfile.employeeId,
@@ -1247,16 +1306,16 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       customerName: warrantyCustName,
       mobileNumber: warrantyPhone,
       customerType: 'Dealer',
-      address: activeCustomer.address || safeProfile.officeAddress || 'Dhaka',
-      district: safeProfile.area || 'Dhaka',
-      dealerOrDistributorName: activeCustomer.name,
+      address: (activeCustomer.id !== 'cust-unselected' ? activeCustomer.address : '') || safeProfile.officeAddress || '',
+      district: safeProfile.area || '',
+      dealerOrDistributorName: activeCustomer.id !== 'cust-unselected' ? activeCustomer.name : warrantyCustName,
       ownershipType: 'Ensec Battery',
-      batteryBrand: 'Ensec Lithium BD',
-      batteryModel: 'Ensec LiFePO4 12V 100Ah',
+      batteryBrand: primaryProduct?.brand || 'Ensec',
+      batteryModel: primaryProduct?.name || '',
       serialNumber: warrantySerial,
-      batteryType: 'LiFePO4',
-      capacityAh: 100,
-      nominalVoltage: 12,
+      batteryType: primaryProduct?.batteryType || '',
+      capacityAh: Number(primaryProduct?.capacityAh) || 0,
+      nominalVoltage: Number(primaryProduct?.voltageV) || 0,
       complaintDate: new Date().toISOString(),
       complaintReceivedBy: safeProfile.name,
       complaintChannel: 'Other',
@@ -1277,7 +1336,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       serialNumber: warrantySerial,
       customerName: warrantyCustName,
       mobileNumber: warrantyPhone,
-      batteryModel: 'Ensec LiFePO4 12V 100Ah',
+      batteryModel: primaryProduct?.name || '',
       defectCategory: warrantyDefect,
       complaintReceivedBy: safeProfile.name,
       status: 'Complaint Registered',
@@ -1303,7 +1362,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
         companyName: clientNameClean,
         address: crmAddress.trim() || undefined,
         contactPerson: crmContactPerson.trim() || undefined,
-        phone: crmPhone.trim() || '+880 1700-000000',
+        phone: crmPhone.trim(),
         email: crmEmail.trim() || undefined,
         channel: crmChannel,
         stage: crmStage as any,
@@ -1341,6 +1400,9 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       setCrmContactPerson('');
       setCrmPhone('');
       setCrmEmail('');
+      setCrmExpectedVolume(0);
+      setCrmDealValue(0);
+      setCrmSpecialDiscount(0);
       setCrmNotes('');
       setActiveTab('home');
     } catch (err: any) {
@@ -1615,7 +1677,9 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                       <Navigation className="w-6 h-6" />
                     </div>
                     <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">Select Market</span>
-                    <span className="text-[10px] text-amber-600 dark:text-amber-400 font-mono -mt-1 font-bold">{selectedMarket}</span>
+                    <span className="text-[10px] text-amber-600 dark:text-amber-400 font-mono -mt-1 font-bold">
+                      {selectedMarket || 'Select Route'}
+                    </span>
                   </div>
 
                   {/* Select Customer */}
@@ -1636,6 +1700,11 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                   {/* Make Visit */}
                   <div
                     onClick={async () => {
+                      if (!selectedCustomerId || activeCustomer.id === 'cust-unselected') {
+                        setBannerNotice('⚠️ Please select a Customer / Outlet before recording a visit.');
+                        setShowCustomerModal(true);
+                        return;
+                      }
                       const todayStr = new Date().toISOString().substring(0, 10);
                       const nowTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                       const coords = await getBestAvailableCoords();
@@ -1652,7 +1721,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                         isProductive: true,
                         orderPlacedBDT: 0,
                         purpose: 'Regular Sales Visit',
-                        feedback: 'Verified battery shelf presence and competitor pricing.',
+                        feedback: '',
                         latitude: coords.lat,
                         longitude: coords.lng,
                       });
@@ -1700,7 +1769,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                 </div>
               </div>
 
-              {/* Active Retailer Card (Matches Screenshot 1 middle card) */}
+              {/* Active Retailer Card */}
               <div
                 onClick={() => {
                   setCustomerSearch('');
@@ -1718,7 +1787,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                         {activeCustomer.name}
                       </h4>
                       <p className="text-[10px] text-slate-500 dark:text-slate-400">
-                        {activeCustomer.territory || selectedMarket} • {activeCustomer.assignedDistributorName || 'Assigned Distributor'}
+                        {activeCustomer.territory || selectedMarket || 'No route'} • {activeCustomer.assignedDistributorName || 'No distributor'}
                       </p>
                     </div>
                   </div>
@@ -1744,17 +1813,27 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                 </div>
               </div>
 
-              {/* Promo Scheme Banner (From Screenshot 2) */}
-              <div className="p-3 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-red-500/10 dark:from-amber-600/30 dark:via-orange-600/20 dark:to-red-600/20 border border-amber-400/40 dark:border-amber-500/30 flex items-center justify-between shadow-2xs">
-                <div className="space-y-0.5">
-                  <div className="text-[10px] font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider">Autumn Promo Scheme</div>
-                  <div className="text-xs font-bold text-slate-900 dark:text-white">Ensec LiFePO4 Inverter & EV Range</div>
-                  <p className="text-[10px] text-amber-800/80 dark:text-amber-200/80">Order 5+ batteries to unlock ৳50/unit instant retailer scheme</p>
+              {/* Active Promo Scheme Banner (rendered strictly from real active offers) */}
+              {activeOffers.length > 0 && (
+                <div className="p-3 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-red-500/10 dark:from-amber-600/30 dark:via-orange-600/20 dark:to-red-600/20 border border-amber-400/40 dark:border-amber-500/30 flex items-center justify-between shadow-2xs">
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider">
+                      Active Promo Scheme
+                    </div>
+                    <div className="text-xs font-bold text-slate-900 dark:text-white">
+                      {activeOffers[0].title || activeOffers[0].discountTitle || activeOffers[0].code}
+                    </div>
+                    {activeOffers[0].description && (
+                      <p className="text-[10px] text-amber-800/80 dark:text-amber-200/80">
+                        {activeOffers[0].description}
+                      </p>
+                    )}
+                  </div>
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-300 shrink-0">
+                    <Tag className="w-5 h-5" />
+                  </div>
                 </div>
-                <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-300 shrink-0">
-                  <Tag className="w-5 h-5" />
-                </div>
-              </div>
+              )}
 
               {/* Quick Hub Links for all Sections including CRM Agreement Lead */}
               <div className="space-y-1.5">
@@ -1899,10 +1978,10 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                   Retailer: {activeCustomer.name}
                 </div>
                 <div className="text-[11px] text-slate-900 leading-tight">
-                  Market: {activeCustomer.territory || selectedMarket}
+                  Market: {activeCustomer.territory || selectedMarket || 'Not Assigned'}
                 </div>
                 <div className="text-[11px] text-slate-900 leading-tight">
-                  Distributor: {activeCustomer.assignedDistributorName || 'Maharam Store'}
+                  Distributor: {activeCustomer.assignedDistributorName || 'Not Assigned'}
                 </div>
                 <div className="text-[11px] text-slate-900 leading-tight">
                   Retail Channel: {activeCustomer.channel || 'Dealer'}
@@ -2063,34 +2142,25 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                     </div>
                   </div>
 
-                  {/* Applied Discounts Box (Exact Match Screen 10) */}
-                  <div className="space-y-1.5">
-                    <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider">Applied Discounts & Schemes</span>
-                    <div className="rounded-xl bg-[#1e2026] border border-white/5 p-3 space-y-2 text-xs">
-                      {enabledSchemes['scheme-1'] && (
-                        <div className="flex items-center justify-between text-slate-300">
-                          <div className="flex items-center gap-1.5">
-                            <Tag className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Autumn Volume Slab Scheme (৳50/unit)</span>
+                  {/* Applied Discounts Box */}
+                  {cartSummary.appliedOffersList.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider">Applied Discounts & Schemes</span>
+                      <div className="rounded-xl bg-[#1e2026] border border-white/5 p-3 space-y-2 text-xs">
+                        {cartSummary.appliedOffersList.map((offer) => (
+                          <div key={offer.id} className="flex items-center justify-between text-slate-300">
+                            <div className="flex items-center gap-1.5">
+                              <Tag className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>{offer.title}</span>
+                            </div>
+                            <span className="text-emerald-400 font-bold font-mono">
+                              - ৳{offer.discountBDT.toLocaleString()}
+                            </span>
                           </div>
-                          <span className="text-emerald-400 font-bold font-mono">
-                            - ৳{(50 * cartSummary.totalQty).toLocaleString()}
-                          </span>
-                        </div>
-                      )}
-                      {enabledSchemes['scheme-2'] && cartSummary.grossTP >= 5000 && (
-                        <div className="flex items-center justify-between text-slate-300">
-                          <div className="flex items-center gap-1.5">
-                            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Dealer Cash Discount (3%)</span>
-                          </div>
-                          <span className="text-emerald-400 font-bold font-mono">
-                            - ৳{Math.round(cartSummary.grossTP * 0.03).toLocaleString()}
-                          </span>
-                        </div>
-                      )}
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Financial Breakdown Table (From Screen 10) */}
                   <div className="rounded-xl bg-[#1e2026] border border-white/5 p-3 space-y-1.5 text-xs text-slate-300 font-medium">
@@ -2265,7 +2335,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                             <div className="text-xs font-bold text-slate-200 mt-1">{ord.customerName}</div>
                             <div className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
                               <MapPin className="w-3 h-3 text-slate-500" />
-                              <span>{ord.deliveryAddress || 'Tongi, Gazipur'}</span>
+                              <span>{ord.deliveryAddress || 'Address not specified'}</span>
                             </div>
                           </div>
                           <div className="text-right">
@@ -2896,16 +2966,9 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                       required
                       value={warrantySerial}
                       onChange={(e) => setWarrantySerial(e.target.value)}
+                      placeholder="Enter or scan battery serial number..."
                       className="w-full p-2 rounded-xl bg-black/40 border border-white/10 text-white font-mono"
                     />
-                    <button
-                      type="button"
-                      onClick={() => setWarrantySerial(`ENS-LFP-${Date.now().toString().slice(-4)}`)}
-                      className="px-3 rounded-xl bg-teal-600/30 text-teal-300 border border-teal-500/30 flex items-center gap-1 font-bold shrink-0"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>Scan</span>
-                    </button>
                   </div>
                 </div>
 
@@ -3892,27 +3955,33 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto no-scrollbar space-y-1.5 max-h-64">
-              {availableMarkets.map((m) => {
-                const isSelected = selectedMarket === m;
-                return (
-                  <button
-                    key={m}
-                    onClick={() => {
-                      setSelectedMarket(m);
-                      setShowMarketModal(false);
-                      setBannerNotice(`📍 Route switched to ${m}`);
-                    }}
-                    className={`w-full p-2.5 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
-                      isSelected
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                        : 'bg-slate-100 dark:bg-black/30 text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-black/50'
-                    }`}
-                  >
-                    <span>{m}</span>
-                    {isSelected && <Check className="w-4 h-4" />}
-                  </button>
-                );
-              })}
+              {availableMarkets.length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                  No markets or beat routes found in your territory or customer records.
+                </div>
+              ) : (
+                availableMarkets.map((m) => {
+                  const isSelected = selectedMarket === m;
+                  return (
+                    <button
+                      key={m}
+                      onClick={() => {
+                        setSelectedMarket(m);
+                        setShowMarketModal(false);
+                        setBannerNotice(`📍 Route switched to ${m}`);
+                      }}
+                      className={`w-full p-2.5 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
+                          : 'bg-slate-100 dark:bg-black/30 text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-black/50'
+                      }`}
+                    >
+                      <span>{m}</span>
+                      {isSelected && <Check className="w-4 h-4" />}
+                    </button>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -3970,49 +4039,43 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             </div>
 
             <div className="space-y-2 text-xs">
-              <div
-                onClick={() =>
-                  setEnabledSchemes((prev) => ({ ...prev, 'scheme-1': !prev['scheme-1'] }))
-                }
-                className={`p-3 rounded-xl border cursor-pointer transition-colors ${
-                  enabledSchemes['scheme-1']
-                    ? 'bg-amber-500/10 border-amber-500 text-amber-200'
-                    : 'bg-black/30 border-white/5 text-slate-400'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="font-bold text-white text-xs">Autumn Volume Slab Scheme</div>
-                  <div className={`w-5 h-5 rounded flex items-center justify-center ${enabledSchemes['scheme-1'] ? 'bg-amber-500 text-slate-950 font-bold' : 'border border-slate-600'}`}>
-                    {enabledSchemes['scheme-1'] && <Check className="w-3.5 h-3.5" />}
-                  </div>
+              {activeOffers.length === 0 ? (
+                <div className="p-4 rounded-xl bg-black/30 border border-white/5 text-center text-slate-400">
+                  No active promotional schemes configured.
                 </div>
-                <p className="text-[11px] text-slate-300 mt-1">
-                  Orders of 2+ Lithium batteries receive flat ৳50 discount per piece.
-                </p>
-                <div className="text-[10px] text-slate-400 mt-0.5">Valid until 31 Dec 2026</div>
-              </div>
-
-              <div
-                onClick={() =>
-                  setEnabledSchemes((prev) => ({ ...prev, 'scheme-2': !prev['scheme-2'] }))
-                }
-                className={`p-3 rounded-xl border cursor-pointer transition-colors ${
-                  enabledSchemes['scheme-2']
-                    ? 'bg-amber-500/10 border-amber-500 text-amber-200'
-                    : 'bg-black/30 border-white/5 text-slate-400'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="font-bold text-white text-xs">3% Dealer Cash Incentive</div>
-                  <div className={`w-5 h-5 rounded flex items-center justify-center ${enabledSchemes['scheme-2'] ? 'bg-amber-500 text-slate-950 font-bold' : 'border border-slate-600'}`}>
-                    {enabledSchemes['scheme-2'] && <Check className="w-3.5 h-3.5" />}
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-300 mt-1">
-                  Orders over ৳5,000 receive 3% extra trade discount on Gross TP.
-                </p>
-                <div className="text-[10px] text-slate-400 mt-0.5">Valid until 31 Dec 2026</div>
-              </div>
+              ) : (
+                activeOffers.map((offer) => {
+                  const isOn = Boolean(enabledSchemes[offer.id]);
+                  const title = offer.title || offer.discountTitle || offer.code || 'Promotional Offer';
+                  const validUntil = offer.validTo || offer.endDate;
+                  return (
+                    <div
+                      key={offer.id}
+                      onClick={() =>
+                        setEnabledSchemes((prev) => ({ ...prev, [offer.id]: !prev[offer.id] }))
+                      }
+                      className={`p-3 rounded-xl border cursor-pointer transition-colors ${
+                        isOn
+                          ? 'bg-amber-500/10 border-amber-500 text-amber-200'
+                          : 'bg-black/30 border-white/5 text-slate-400'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="font-bold text-white text-xs">{title}</div>
+                        <div className={`w-5 h-5 rounded flex items-center justify-center ${isOn ? 'bg-amber-500 text-slate-950 font-bold' : 'border border-slate-600'}`}>
+                          {isOn && <Check className="w-3.5 h-3.5" />}
+                        </div>
+                      </div>
+                      {offer.description && (
+                        <p className="text-[11px] text-slate-300 mt-1">{offer.description}</p>
+                      )}
+                      {validUntil && (
+                        <div className="text-[10px] text-slate-400 mt-0.5">Valid until {validUntil}</div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             <button
@@ -4124,8 +4187,8 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             {/* Retailer Info Header (Green card from Screenshot 2) */}
             <div className="p-3 rounded-xl bg-emerald-600 text-white space-y-1 font-semibold text-xs">
               <div className="font-bold text-sm">Retailer: {selectedOrderForAction.customerName}</div>
-              <div>Market: Kadamtoly Doria / Mirpur</div>
-              <div>Distributor: {selectedOrderForAction.distributorName}</div>
+              <div>Market: {selectedOrderForAction.deliveryAddress || activeCustomer.territory || selectedMarket || '-'}</div>
+              <div>Distributor: {selectedOrderForAction.distributorName || '-'}</div>
               <div>Channel: {selectedOrderForAction.channel}</div>
             </div>
 

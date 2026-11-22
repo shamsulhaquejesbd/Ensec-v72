@@ -104,13 +104,9 @@ import {
   INITIAL_DISTRIBUTORS,
   INITIAL_CUSTOMERS,
   INITIAL_CRM_AGREEMENTS,
-  INITIAL_FIELD_FORCE,
-  INITIAL_VISIT_LOGS,
   INITIAL_OFFERS,
-  INITIAL_SALES_ORDERS,
   INITIAL_REQUISITIONS,
   INITIAL_PAYMENTS,
-  INITIAL_TADA_LIST,
   INITIAL_CASH_BOOK,
   INITIAL_PAYROLL,
   INITIAL_AUDIT_LOGS,
@@ -2219,100 +2215,36 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return false;
   };
 
+  const purgeFieldForceLocalSessionMemory = () => {
+    if (typeof window === 'undefined') return;
+    const fieldForceStorageKeys = [
+      'ensec_field_force_reps',
+      'ensec_visit_logs',
+      'ensec_sales_orders',
+      'ensec_tada_list',
+      'ensec_mobile_cart',
+      'ensec_mobile_schemes',
+      'ensec_mobile_selected_customer',
+      'ensec_mobile_selected_market',
+    ];
+    fieldForceStorageKeys.forEach((key) => {
+      try { localStorage.removeItem(key); } catch {}
+      try { sessionStorage.removeItem(key); } catch {}
+    });
+  };
+
   const [fieldForceReps, setFieldForceReps] = useState<FieldForceRep[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('ensec_field_force_reps') || sessionStorage.getItem('ensec_field_force_reps');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            // Remove test or mock legacy entries from stored session/local memory
-            const cleaned = parsed.filter((r: FieldForceRep) => !isTestOrMockRep(r));
-            if (cleaned.length !== parsed.length) {
-              if (cleaned.length > 0) {
-                localStorage.setItem('ensec_field_force_reps', JSON.stringify(cleaned));
-              } else {
-                localStorage.removeItem('ensec_field_force_reps');
-                sessionStorage.removeItem('ensec_field_force_reps');
-              }
-            }
-            return cleaned;
-          }
-        }
-      } catch (e) {}
-    }
-    // Clean production baseline: no test or mock data!
+    purgeFieldForceLocalSessionMemory();
     return [];
   });
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const cleaned = fieldForceReps.filter((r) => !isTestOrMockRep(r));
-        if (cleaned.length > 0) {
-          localStorage.setItem('ensec_field_force_reps', JSON.stringify(cleaned));
-        } else {
-          localStorage.removeItem('ensec_field_force_reps');
-          sessionStorage.removeItem('ensec_field_force_reps');
-        }
-      } catch (e) {}
-    }
-  }, [fieldForceReps]);
-  const [visitLogs, setVisitLogs] = useState<VisitLog[]>(INITIAL_VISIT_LOGS);
+  const [visitLogs, setVisitLogs] = useState<VisitLog[]>([]);
   const [offers, setOffers] = useState<OfferPromotion[]>(() => {
     if (typeof window !== 'undefined' && checkSupabaseConfigured()) {
       return [];
     }
     return INITIAL_OFFERS;
   });
-  const [salesOrders, setSalesOrders] = useState<SalesOrder[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('ensec_sales_orders') || sessionStorage.getItem('ensec_sales_orders');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (Array.isArray(parsed)) {
-            // Filter out any legacy dummy sample orders
-            return parsed
-              .filter(
-                (o: SalesOrder) =>
-                  !o.id?.startsWith('so-2026-09-') &&
-                  !o.id?.startsWith('so-2026-10-') &&
-                  !o.id?.startsWith('so-hist-')
-              )
-              .map((o: SalesOrder) => {
-                if (o.status === 'Submitted') {
-                  return {
-                    ...o,
-                    doNumber: undefined,
-                    challanNumber: undefined,
-                    doAccepted: false,
-                    serialsUpdated: false,
-                  };
-                }
-                return o;
-              });
-          }
-        }
-      } catch (e) {
-        console.warn('Failed to parse stored sales orders', e);
-      }
-    }
-    return INITIAL_SALES_ORDERS;
-  });
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        if (salesOrders.length > 0) {
-          localStorage.setItem('ensec_sales_orders', JSON.stringify(salesOrders));
-        } else {
-          localStorage.removeItem('ensec_sales_orders');
-          sessionStorage.removeItem('ensec_sales_orders');
-        }
-      } catch (e) {}
-    }
-  }, [salesOrders]);
+  const [salesOrders, setSalesOrders] = useState<SalesOrder[]>([]);
 
   const clearSalesOrders = () => {
     setSalesOrders([]);
@@ -2425,40 +2357,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch (e) {}
     }
   }, [payments]);
-  const [tadaList, setTadaList] = useState<TADAEntry[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('ensec_tada_list');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            return parsed.filter(
-              (item: TADAEntry) =>
-                !item.id?.startsWith('tada-0') &&
-                item.id !== 'tada-10' &&
-                item.ffCode !== 'MEL00445'
-            );
-          }
-        }
-      } catch (e) {
-        console.warn('Error reading tada list:', e);
-      }
-    }
-    return INITIAL_TADA_LIST;
-  });
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        if (tadaList.length > 0) {
-          localStorage.setItem('ensec_tada_list', JSON.stringify(tadaList));
-        } else {
-          localStorage.removeItem('ensec_tada_list');
-          sessionStorage.removeItem('ensec_tada_list');
-        }
-      } catch (e) {}
-    }
-  }, [tadaList]);
+  const [tadaList, setTadaList] = useState<TADAEntry[]>([]);
 
   const [cashBook, setCashBook] = useState<CashBookEntry[]>(INITIAL_CASH_BOOK);
   const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>(INITIAL_PAYROLL);
@@ -5914,16 +5813,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .order('id', { ascending: false });
 
         if (!error && Array.isArray(data)) {
-          const prevCachedOrders: SalesOrder[] = (() => {
-            if (typeof window !== 'undefined') {
-              try {
-                return JSON.parse(localStorage.getItem('ensec_sales_orders') || '[]');
-              } catch {
-                return [];
-              }
-            }
-            return [];
-          })();
+          const prevCachedOrders: SalesOrder[] = salesOrders;
 
           const mapped: SalesOrder[] = data.map((row: any) => {
             const cached = prevCachedOrders.find(
@@ -6006,11 +5896,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
 
           setSalesOrders(mapped);
-          if (typeof window !== 'undefined') {
-            try {
-              localStorage.setItem('ensec_sales_orders', JSON.stringify(mapped));
-            } catch (e) {}
-          }
         } else if (error) {
           console.warn('Supabase refreshSalesOrders notice:', error.message);
         }
@@ -7305,26 +7190,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     if (typeof window !== 'undefined') {
       purgePayrollLocalSessionMemory();
+      purgeFieldForceLocalSessionMemory();
       try {
         const cachedCats = localStorage.getItem('ensec_product_categories');
         if (cachedCats && cachedCats.includes('Telecom Energy Storage')) {
           localStorage.removeItem('ensec_product_categories');
-        }
-
-        const cachedReps = localStorage.getItem('ensec_field_force_reps') || sessionStorage.getItem('ensec_field_force_reps');
-        if (cachedReps) {
-          try {
-            const parsed = JSON.parse(cachedReps);
-            if (Array.isArray(parsed)) {
-              const cleaned = parsed.filter((r: FieldForceRep) => !isTestOrMockRep(r));
-              if (cleaned.length === 0) {
-                localStorage.removeItem('ensec_field_force_reps');
-                sessionStorage.removeItem('ensec_field_force_reps');
-              } else if (cleaned.length !== parsed.length) {
-                localStorage.setItem('ensec_field_force_reps', JSON.stringify(cleaned));
-              }
-            }
-          } catch {}
         }
 
         const cachedExpenses = localStorage.getItem('ensec_expense_entries') || sessionStorage.getItem('ensec_expense_entries');
