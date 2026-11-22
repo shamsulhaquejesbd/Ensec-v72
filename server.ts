@@ -2050,6 +2050,89 @@ export function createAppServer() {
     });
   });
 
+  const reverseGeocodeCache = new Map<string, { address: string; displayName: string; cachedAt: number }>();
+
+  app.get('/api/geocode/reverse', async (req, res) => {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!isValidCoordinatePair(lat, lng)) {
+      return res.status(400).json({ ok: false, error: 'Invalid latitude or longitude.' });
+    }
+
+    const cacheKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+    const cached = reverseGeocodeCache.get(cacheKey);
+    if (cached && Date.now() - cached.cachedAt < 24 * 60 * 60 * 1000) {
+      return res.json({
+        ok: true,
+        lat,
+        lng,
+        address: cached.address,
+        displayName: cached.displayName,
+        cached: true,
+      });
+    }
+
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+        lat.toFixed(6)
+      )}&lon=${encodeURIComponent(lng.toFixed(6))}&zoom=18&addressdetails=1`;
+      const upstream = await fetch(url, {
+        headers: {
+          'User-Agent': 'EnsecERP/1.0 (https://ensecbd.com)',
+          'Accept-Language': 'en',
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!upstream.ok) {
+        return res.status(502).json({ ok: false, error: `Geocoder HTTP ${upstream.status}` });
+      }
+
+      const data: any = await upstream.json();
+      const addr = data?.address || {};
+      const streetPart = [addr.house_number, addr.road].filter(Boolean).join(' ').trim();
+      const areaPart =
+        addr.quarter ||
+        addr.neighbourhood ||
+        addr.suburb ||
+        addr.village ||
+        addr.town ||
+        '';
+      const cityPart = addr.city || addr.state_district || addr.county || '';
+      const postcodePart = addr.postcode ? `${cityPart ? '-' : ''}${addr.postcode}` : '';
+      const parts = [
+        streetPart,
+        areaPart,
+        cityPart ? `${cityPart}${postcodePart}` : addr.postcode || '',
+      ].filter((p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx);
+
+      const formattedAddress =
+        parts.join(', ').trim() || String(data?.display_name || '').trim();
+      const displayName = String(data?.display_name || formattedAddress).trim();
+
+      if (formattedAddress) {
+        reverseGeocodeCache.set(cacheKey, {
+          address: formattedAddress,
+          displayName,
+          cachedAt: Date.now(),
+        });
+      }
+
+      return res.json({
+        ok: true,
+        lat,
+        lng,
+        address: formattedAddress,
+        displayName,
+      });
+    } catch (err: any) {
+      return res.status(502).json({
+        ok: false,
+        error: err?.message || 'Reverse geocoding failed.',
+      });
+    }
+  });
+
   app.get('/api/manufacturing/permissions', async (req, res) => {
     const caller = await resolveRequestUser(req);
     const permissions = resolveManufacturingCostPermissions(caller);

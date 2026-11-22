@@ -2398,6 +2398,30 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     sqlFix: null,
   });
 
+  const upgradeLegacyDefaultOfficeCoords = (loc: OfficeLocation): OfficeLocation => {
+    const legacyDefaults: Record<string, { lat: number; lng: number }> = {
+      'office-hq': { lat: 23.8103, lng: 90.4125 },
+      'office-mirpur': { lat: 23.8041, lng: 90.3667 },
+      'office-kushtia': { lat: 23.9013, lng: 89.1204 },
+      'office-ctg': { lat: 22.3335, lng: 91.8123 },
+    };
+    const legacy = legacyDefaults[loc.id];
+    const target = DEFAULT_OFFICE_LOCATIONS.find((d) => d.id === loc.id);
+    if (
+      legacy &&
+      target &&
+      Math.abs(Number(loc.latitude) - legacy.lat) < 0.0005 &&
+      Math.abs(Number(loc.longitude) - legacy.lng) < 0.0005
+    ) {
+      return {
+        ...loc,
+        latitude: target.latitude,
+        longitude: target.longitude,
+      };
+    }
+    return loc;
+  };
+
   const [officeLocations, setOfficeLocations] = useState<OfficeLocation[]>(() => {
     if (typeof window !== 'undefined') {
       try {
@@ -2405,19 +2429,19 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (stored) {
           const parsed = JSON.parse(stored);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            if (localStorage.getItem('ensec_geofence_radius_200_v1') !== 'true') {
-              const migrated = parsed.map((loc: OfficeLocation) => ({
-                ...loc,
+            const migrated = parsed.map((loc: OfficeLocation) => {
+              const upgraded = upgradeLegacyDefaultOfficeCoords(loc);
+              return {
+                ...upgraded,
                 allowedRadiusMeters:
-                  !loc.allowedRadiusMeters || loc.allowedRadiusMeters === 50
+                  !upgraded.allowedRadiusMeters || upgraded.allowedRadiusMeters === 50
                     ? DEFAULT_ALLOWED_RADIUS_METERS
-                    : loc.allowedRadiusMeters,
-              }));
-              localStorage.setItem('ensec_office_locations', JSON.stringify(migrated));
-              localStorage.setItem('ensec_geofence_radius_200_v1', 'true');
-              return migrated;
-            }
-            return parsed;
+                    : upgraded.allowedRadiusMeters,
+              };
+            });
+            localStorage.setItem('ensec_office_locations', JSON.stringify(migrated));
+            localStorage.setItem('ensec_geofence_radius_200_v1', 'true');
+            return migrated;
           }
         }
         localStorage.setItem('ensec_geofence_radius_200_v1', 'true');
@@ -4217,11 +4241,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 latitude:
                   typeof row.current_location?.latitude === 'number'
                     ? row.current_location.latitude
-                    : (Number(row.current_latitude) || 23.8103),
+                    : (Number(row.current_latitude) || Number(row.office_latitude) || DEFAULT_OFFICE_LOCATIONS[0].latitude),
                 longitude:
                   typeof row.current_location?.longitude === 'number'
                     ? row.current_location.longitude
-                    : (Number(row.current_longitude) || 90.4125),
+                    : (Number(row.current_longitude) || Number(row.office_longitude) || DEFAULT_OFFICE_LOCATIONS[0].longitude),
                 address:
                   row.current_location?.address ||
                   row.last_known_address ||
@@ -4300,18 +4324,20 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .order('created_at', { ascending: true });
         if (!error && Array.isArray(data)) {
           if (data.length > 0) {
-            const mapped: OfficeLocation[] = data.map((row: any) => ({
-              id: String(row.id),
-              code: row.code || undefined,
-              name: row.name || 'Office Location',
-              address: row.address || '',
-              latitude: Number(row.latitude),
-              longitude: Number(row.longitude),
-              allowedRadiusMeters: Number(row.allowed_radius_meters) || DEFAULT_ALLOWED_RADIUS_METERS,
-              status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-              createdAt: row.created_at,
-              updatedAt: row.updated_at,
-            }));
+            const mapped: OfficeLocation[] = data.map((row: any) =>
+              upgradeLegacyDefaultOfficeCoords({
+                id: String(row.id),
+                code: row.code || undefined,
+                name: row.name || 'Office Location',
+                address: row.address || '',
+                latitude: Number(row.latitude),
+                longitude: Number(row.longitude),
+                allowedRadiusMeters: Number(row.allowed_radius_meters) || DEFAULT_ALLOWED_RADIUS_METERS,
+                status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+                createdAt: row.created_at,
+                updatedAt: row.updated_at,
+              })
+            );
             setOfficeLocations(mapped);
             if (typeof window !== 'undefined') {
               localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
@@ -16399,9 +16425,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       taDaBDT: repData.taDaBDT ?? 0,
       mobileAllowanceBDT: repData.mobileAllowanceBDT ?? 0,
       currentLocation: repData.currentLocation || {
-        latitude: 23.8103,
-        longitude: 90.4125,
-        address: `${repData.territory || repData.area || 'Dhaka'}, Bangladesh`,
+        latitude: repData.officeLatitude ?? DEFAULT_OFFICE_LOCATIONS[0].latitude,
+        longitude: repData.officeLongitude ?? DEFAULT_OFFICE_LOCATIONS[0].longitude,
+        address: repData.officeAddress || `${repData.territory || repData.area || 'Dhaka'}, Bangladesh`,
         lastUpdated: 'Just registered',
         speedKmH: 0,
         batteryLevel: 95,

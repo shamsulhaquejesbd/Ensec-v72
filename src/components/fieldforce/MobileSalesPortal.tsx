@@ -714,6 +714,94 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
     }
   }, [activeTab, requestCurrentGpsPosition]);
 
+  // Reverse-geocoded addresses resolved strictly from latitude & longitude
+  const [officeReverseGeo, setOfficeReverseGeo] = useState<{
+    coordKey: string;
+    address: string;
+  } | null>(null);
+  const [liveGpsReverseGeo, setLiveGpsReverseGeo] = useState<{
+    coordKey: string;
+    address: string;
+  } | null>(null);
+
+  const fetchReverseGeocode = useCallback(async (lat: number, lng: number): Promise<string | null> => {
+    if (!isValidCoordinatePair(lat, lng)) return null;
+    try {
+      const res = await fetch(
+        `/api/geocode/reverse?lat=${encodeURIComponent(lat.toFixed(6))}&lng=${encodeURIComponent(lng.toFixed(6))}`
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data?.ok && data?.address) {
+        return String(data.address).trim();
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // Resolve accurate address for the assigned office / profile latitude & longitude
+  useEffect(() => {
+    const lat = assignedOfficeConfig.officeLatitude;
+    const lng = assignedOfficeConfig.officeLongitude;
+    if (!isValidCoordinatePair(lat, lng)) return;
+    const coordKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+    if (officeReverseGeo?.coordKey === coordKey) return;
+
+    let cancelled = false;
+    fetchReverseGeocode(lat, lng).then((addr) => {
+      if (!cancelled && addr) {
+        setOfficeReverseGeo({ coordKey, address: addr });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    assignedOfficeConfig.officeLatitude,
+    assignedOfficeConfig.officeLongitude,
+    officeReverseGeo?.coordKey,
+    fetchReverseGeocode,
+  ]);
+
+  // Resolve accurate address for live captured GPS coordinates
+  useEffect(() => {
+    if (!capturedGpsCoords) return;
+    const { latitude, longitude } = capturedGpsCoords;
+    if (!isValidCoordinatePair(latitude, longitude)) return;
+    const coordKey = `${latitude.toFixed(5)},${longitude.toFixed(5)}`;
+    if (liveGpsReverseGeo?.coordKey === coordKey) return;
+
+    let cancelled = false;
+    fetchReverseGeocode(latitude, longitude).then((addr) => {
+      if (!cancelled && addr) {
+        setLiveGpsReverseGeo({ coordKey, address: addr });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [capturedGpsCoords, liveGpsReverseGeo?.coordKey, fetchReverseGeocode]);
+
+  // On Home tab, silently capture live GPS if geolocation permission is already granted
+  useEffect(() => {
+    if (activeTab !== 'home' || capturedGpsCoords) return;
+    if (typeof navigator === 'undefined' || !navigator.permissions?.query) return;
+    let cancelled = false;
+    navigator.permissions
+      .query({ name: 'geolocation' as PermissionName })
+      .then((perm) => {
+        if (!cancelled && perm.state === 'granted') {
+          requestCurrentGpsPosition().catch(() => {});
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, capturedGpsCoords, requestCurrentGpsPosition]);
+
   const handleMobileGpsCheckIn = async () => {
     setAttendanceResultAlert(null);
     setAttendanceSubmitting(true);
@@ -1608,12 +1696,12 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
               {/* Authenticated Employee Profile Card */}
               <div className="p-3.5 rounded-2xl bg-white dark:bg-[#1e2026] border border-slate-200 dark:border-white/5 space-y-3 shadow-xs">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-amber-500 to-orange-600 flex items-center justify-center font-bold text-white shadow-md text-base relative shrink-0">
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-amber-500 to-orange-600 flex items-center justify-center font-bold text-white shadow-md text-base relative shrink-0 mt-0.5">
                       <span>{getInitials(resolvedProfile.name)}</span>
                       <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#1e2026]"></span>
                     </div>
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <h2 className="font-bold text-sm text-slate-900 dark:text-white truncate">
                           {resolvedProfile.name}
@@ -1625,13 +1713,72 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                       <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 mt-0.5 truncate">
                         ID: {resolvedProfile.employeeCode} • {resolvedProfile.designation}
                       </div>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1 mt-0.5">
-                        <MapPin className="w-3 h-3 text-amber-500 shrink-0" />
-                        <span className="truncate">
-                          {resolvedProfile.assignedOfficeName}
-                          {resolvedProfile.officeAddress ? ` • ${resolvedProfile.officeAddress}` : ''}
-                        </span>
-                      </p>
+                      {(() => {
+                        const officeCoordKey = `${assignedOfficeConfig.officeLatitude.toFixed(5)},${assignedOfficeConfig.officeLongitude.toFixed(5)}`;
+                        const verifiedOfficeAddress =
+                          (officeReverseGeo?.coordKey === officeCoordKey ? officeReverseGeo.address : '') ||
+                          resolvedProfile.officeAddress ||
+                          assignedOfficeConfig.officeAddress;
+                        const liveCoordKey = capturedGpsCoords
+                          ? `${capturedGpsCoords.latitude.toFixed(5)},${capturedGpsCoords.longitude.toFixed(5)}`
+                          : '';
+                        const verifiedLiveAddress =
+                          liveCoordKey && liveGpsReverseGeo?.coordKey === liveCoordKey
+                            ? liveGpsReverseGeo.address
+                            : '';
+
+                        return (
+                          <div className="mt-1 space-y-1">
+                            <div className="text-[11px] text-slate-600 dark:text-slate-300 flex items-start gap-1">
+                              <MapPin className="w-3 h-3 text-amber-500 shrink-0 mt-0.5" />
+                              <div className="min-w-0">
+                                <div className="truncate font-medium">
+                                  {assignedOfficeConfig.officeName}
+                                  {verifiedOfficeAddress ? ` • ${verifiedOfficeAddress}` : ''}
+                                </div>
+                                <div className="text-[10px] font-mono text-slate-400 dark:text-slate-500 tabular-nums">
+                                  Lat: {assignedOfficeConfig.officeLatitude.toFixed(5)}, Lng: {assignedOfficeConfig.officeLongitude.toFixed(5)}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                              {capturedGpsCoords ? (
+                                <div className="flex items-start gap-1 text-emerald-600 dark:text-emerald-400 min-w-0">
+                                  <Crosshair className="w-3 h-3 shrink-0 mt-0.5" />
+                                  <div className="min-w-0">
+                                    <div className="truncate font-medium">
+                                      {verifiedLiveAddress || 'Resolving GPS address...'}
+                                    </div>
+                                    <div className="font-mono text-[9px] text-slate-400 dark:text-slate-500 tabular-nums">
+                                      GPS: {capturedGpsCoords.latitude.toFixed(5)}, {capturedGpsCoords.longitude.toFixed(5)} (±{capturedGpsCoords.accuracy}m)
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 dark:text-slate-500 flex items-center gap-1">
+                                  <Crosshair className="w-3 h-3 shrink-0" />
+                                  <span>
+                                    {gpsStatusState === 'detecting'
+                                      ? 'Detecting live GPS...'
+                                      : gpsStatusState === 'denied'
+                                      ? 'Live GPS permission denied'
+                                      : 'Tap locate to verify live GPS address'}
+                                  </span>
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => requestCurrentGpsPosition().catch(() => {})}
+                                className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300 font-semibold shrink-0 inline-flex items-center gap-1 cursor-pointer"
+                                title="Refresh GPS Coordinates & Address"
+                              >
+                                <RefreshCw className={`w-2.5 h-2.5 ${gpsStatusState === 'detecting' ? 'animate-spin' : ''}`} />
+                                <span>{capturedGpsCoords ? 'Refresh' : 'Locate'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>

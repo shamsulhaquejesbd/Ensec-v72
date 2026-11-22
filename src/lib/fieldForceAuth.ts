@@ -6,6 +6,7 @@ import {
   DEFAULT_OFFICE_LOCATIONS,
   DEFAULT_SHIFT_END_TIME,
   DEFAULT_SHIFT_START_TIME,
+  calculateHaversineDistanceMeters,
   isValidCoordinatePair,
 } from './geofence.ts';
 
@@ -253,9 +254,22 @@ export function resolveEmployeeForERPUser(
   const area = String(matchedRep?.area || user.area || '').trim();
   const territory = String(matchedRep?.territory || user.territory || '').trim();
 
+  const repHasCustomDistantCoords =
+    hasValidRepCoords &&
+    calculateHaversineDistanceMeters(
+      officeLatitude,
+      officeLongitude,
+      assignedOffice.latitude,
+      assignedOffice.longitude
+    ) > 500;
+
+  const explicitRepAddress = String(matchedRep?.officeAddress || '').trim();
   const officeAddress = String(
-    matchedRep?.officeAddress ||
-      assignedOffice.address ||
+    (repHasCustomDistantCoords
+      ? explicitRepAddress && explicitRepAddress !== assignedOffice.address
+        ? explicitRepAddress
+        : [territory, area, region].filter(Boolean).join(', ')
+      : explicitRepAddress || assignedOffice.address) ||
       [territory, area, region].filter(Boolean).join(', ') ||
       department
   ).trim();
