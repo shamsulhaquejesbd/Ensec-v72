@@ -37,6 +37,10 @@ import {
 import { FieldForceRep } from '../../types/erp';
 import { useERP } from '../../context/ERPContext';
 import { formatLateDuration } from '../../lib/geofence.ts';
+import {
+  findLinkedUserForEmployee,
+  resolveGeofenceConfigFromUser,
+} from '../../lib/fieldForceAuth.ts';
 import { EmployeeQrSingleModal } from './EmployeeQrModal.tsx';
 
 interface EmployeeProfileModalProps {
@@ -62,6 +66,9 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
   onEdit,
 }) => {
   const {
+    users,
+    officeLocations,
+    payrollSettings,
     salaryStructures,
     attendanceRecords,
     leaveRecords,
@@ -76,6 +83,16 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
 
   const [activeTab, setActiveTab] = useState<ProfileTab>('personal');
   const [showQrModal, setShowQrModal] = useState<boolean>(false);
+
+  const empGeofence = useMemo(() => {
+    const linkedUser = findLinkedUserForEmployee(employee, users);
+    return resolveGeofenceConfigFromUser(
+      linkedUser,
+      officeLocations,
+      payrollSettings,
+      employee.branchWorkplace
+    );
+  }, [employee, users, officeLocations, payrollSettings]);
 
   // Associated Data Lookups
   const salaryStructure = useMemo(() => {
@@ -718,10 +735,10 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
                   </div>
                   <div>
                     <div className="font-bold text-slate-900 dark:text-white">
-                      {employee.assignedOfficeName || employee.branchWorkplace || 'Head Office (Gulshan HQ)'}
+                      {empGeofence.assignedOfficeName}
                     </div>
                     <div className="text-[11px] text-slate-500">
-                      {employee.officeAddress || 'Configured Office Geofence'}
+                      {empGeofence.officeAddress || 'Configured Office Geofence'}
                     </div>
                   </div>
                 </div>
@@ -729,14 +746,14 @@ export const EmployeeProfileModal: React.FC<EmployeeProfileModalProps> = ({
                   <div>
                     <span className="text-[10px] uppercase text-slate-400 block">Coordinates</span>
                     <span className="font-semibold text-slate-800 dark:text-slate-200">
-                      {employee.officeLatitude ? Number(employee.officeLatitude).toFixed(5) : '23.81030'},{' '}
-                      {employee.officeLongitude ? Number(employee.officeLongitude).toFixed(5) : '90.41250'}
+                      {Number(empGeofence.officeLatitude).toFixed(5)},{' '}
+                      {Number(empGeofence.officeLongitude).toFixed(5)}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] uppercase text-slate-400 block">Allowed Radius</span>
                     <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                      {employee.allowedRadiusMeters || 200} Meters
+                      {empGeofence.allowedRadiusMeters} Meters
                     </span>
                   </div>
                 </div>

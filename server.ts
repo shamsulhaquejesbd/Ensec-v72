@@ -23,9 +23,11 @@ import type {
   PayrollSettings,
   RejectedAttendanceAttempt,
 } from './src/types/payroll.ts';
-import type { FieldForceRep } from './src/types/erp.ts';
+import type { FieldForceRep, User } from './src/types/erp.ts';
 import {
+  findLinkedUserForEmployee,
   resolveEmployeeForERPUser,
+  resolveGeofenceConfigFromUser,
   verifyTransactionIdentityMatchesUser,
   type ResolvedMobileEmployeeProfile,
 } from './src/lib/fieldForceAuth.ts';
@@ -91,6 +93,86 @@ const lastQrScanCooldownMap = new Map<string, number>(); // key: employeeId -> l
 const attendanceLockQueues = new Map<string, Promise<void>>(); // key: `${employeeId}_${date}`
 let payrollSettingsStore: Partial<PayrollSettings> = {};
 const QR_SCAN_COOLDOWN_MS = 3000;
+const mfgUsersCache = new Map<string, any>();
+const fieldForceRepsCache = new Map<string, FieldForceRep>();
+
+const indexUserInMfgCache = (u: any) => {
+  if (!u || typeof u !== 'object') return;
+  if (u.id) mfgUsersCache.set(String(u.id).toLowerCase(), u);
+  if (u.userId) mfgUsersCache.set(String(u.userId).toLowerCase(), u);
+  if (u.uid) mfgUsersCache.set(String(u.uid).toLowerCase(), u);
+  if (u.salesmanCode) mfgUsersCache.set(String(u.salesmanCode).toLowerCase(), u);
+  if (u.email) mfgUsersCache.set(String(u.email).toLowerCase(), u);
+};
+
+const mapSupabaseUserRow = (row: any) => {
+  let parsedPermissions = row.permissions;
+  if (typeof parsedPermissions === 'string') {
+    try {
+      parsedPermissions = JSON.parse(parsedPermissions);
+    } catch {
+      parsedPermissions = null;
+    }
+  }
+  const geoBridge =
+    parsedPermissions &&
+    typeof parsedPermissions === 'object' &&
+    parsedPermissions.geofence &&
+    typeof parsedPermissions.geofence === 'object'
+      ? parsedPermissions.geofence
+      : undefined;
+  const rawLat = row.office_latitude ?? geoBridge?.officeLatitude;
+  const rawLng = row.office_longitude ?? geoBridge?.officeLongitude;
+  const rawRadius = row.allowed_radius_meters ?? geoBridge?.allowedRadiusMeters;
+  const rawLocStatus = row.location_status ?? geoBridge?.locationStatus;
+  const rawGrace = row.grace_period_minutes ?? geoBridge?.gracePeriodMinutes;
+
+  return {
+    id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
+    userId:
+      row.user_id ||
+      row.uid ||
+      (row.email ? String(row.email).split('@')[0].toUpperCase() : `EMP-${row.id}`),
+    name: row.name || 'Staff User',
+    email: row.email || '',
+    phone: row.phone || '',
+    role: row.role || 'Field Force',
+    designation: row.designation || '',
+    department: row.department || '',
+    region: row.region || '',
+    area: row.area || '',
+    territory: row.territory || '',
+    isSalesman: row.is_salesman,
+    salesmanCode: row.salesman_code || row.salesmancode || undefined,
+    monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
+    assignedOfficeId: row.assigned_office_id || geoBridge?.assignedOfficeId || undefined,
+    assignedOfficeName: row.assigned_office_name || geoBridge?.assignedOfficeName || undefined,
+    officeLatitude:
+      rawLat !== null && rawLat !== undefined && rawLat !== '' && Number.isFinite(Number(rawLat))
+        ? Number(rawLat)
+        : undefined,
+    officeLongitude:
+      rawLng !== null && rawLng !== undefined && rawLng !== '' && Number.isFinite(Number(rawLng))
+        ? Number(rawLng)
+        : undefined,
+    allowedRadiusMeters: Number(rawRadius) > 0 ? Number(rawRadius) : undefined,
+    officeAddress: row.office_address || geoBridge?.officeAddress || undefined,
+    locationStatus:
+      rawLocStatus === 'Inactive'
+        ? ('Inactive' as const)
+        : rawLocStatus === 'Active'
+        ? ('Active' as const)
+        : undefined,
+    shiftStartTime: row.shift_start_time || geoBridge?.shiftStartTime || undefined,
+    shiftEndTime: row.shift_end_time || geoBridge?.shiftEndTime || undefined,
+    gracePeriodMinutes:
+      rawGrace !== null && rawGrace !== undefined && rawGrace !== '' && Number.isFinite(Number(rawGrace))
+        ? Number(rawGrace)
+        : undefined,
+    status: row.status || 'Active',
+    permissions: parsedPermissions || {},
+  };
+};
 
 async function withAttendanceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = attendanceLockQueues.get(key) || Promise.resolve();
@@ -177,11 +259,91 @@ interface ResolvedOfficeConfig {
 }
 
 async function resolveOfficeForEmployee(body: any): Promise<ResolvedOfficeConfig> {
-  // 1. Prefer server-stored office if assignedOfficeId exists
-  const officeId = String(body.assignedOfficeId || body.officeId || '').trim();
-  let storedOffice = officeId ? officeLocationsStore.get(officeId) : undefined;
+  // 1. Resolve User record (authoritative owner of Assigned Office GPS & Shift Geofence)
+  let resolvedUser: Partial<User> | undefined =
+    body.user && typeof body.user === 'object' ? (body.user as Partial<User>) : undefined;
 
-  if (!storedOffice && serverSupabase && officeId) {
+  if (!resolvedUser) {
+    const candidateKeys = [body.userId, body.userCode, body.userEmail]
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter(Boolean);
+    for (const k of candidateKeys) {
+      const hit = mfgUsersCache.get(k);
+      if (hit) {
+        resolvedUser = hit;
+        break;
+      }
+    }
+  }
+
+  if (!resolvedUser && (body.employeeId || body.employeeCode || body.employeeName)) {
+    const allUsers = Array.from(mfgUsersCache.values());
+    if (allUsers.length > 0) {
+      const cachedRep =
+        (body.employeeId ? fieldForceRepsCache.get(String(body.employeeId)) : undefined) ||
+        Array.from(fieldForceRepsCache.values()).find(
+          (r) =>
+            (body.employeeId && String(r.id) === String(body.employeeId)) ||
+            (body.employeeCode && r.code && r.code.toLowerCase() === String(body.employeeCode).toLowerCase())
+        ) ||
+        ({
+          id: String(body.employeeId || ''),
+          userId: body.userId ? String(body.userId) : undefined,
+          code: String(body.employeeCode || ''),
+          name: String(body.employeeName || ''),
+        } as Partial<FieldForceRep>);
+      resolvedUser = findLinkedUserForEmployee(cachedRep, allUsers);
+    }
+  }
+
+  // Query Supabase users table if cache missed or if we want authoritative DB values
+  if (serverSupabase && (!resolvedUser || !isValidCoordinatePair(Number(resolvedUser.officeLatitude), Number(resolvedUser.officeLongitude)))) {
+    try {
+      const uidOrId = String(resolvedUser?.userId || resolvedUser?.id || body.userId || '').trim();
+      const email = String(resolvedUser?.email || body.userEmail || '').trim();
+      let dbRow: any = null;
+      if (email) {
+        const { data } = await serverSupabase.from('users').select('*').ilike('email', email).limit(1).maybeSingle();
+        if (data) dbRow = data;
+      }
+      if (!dbRow && uidOrId) {
+        const { data } = await serverSupabase
+          .from('users')
+          .select('*')
+          .or(`uid.eq.${uidOrId},user_id.eq.${uidOrId}`)
+          .limit(1)
+          .maybeSingle();
+        if (data) dbRow = data;
+      }
+      if (!dbRow && (body.employeeId || body.employeeCode || body.employeeName)) {
+        const { data: allUserRows } = await serverSupabase.from('users').select('*');
+        if (Array.isArray(allUserRows) && allUserRows.length > 0) {
+          const mappedUsers = allUserRows.map(mapSupabaseUserRow);
+          for (const mu of mappedUsers) {
+            indexUserInMfgCache(mu);
+          }
+          const empCandidate: Partial<FieldForceRep> = {
+            id: String(body.employeeId || ''),
+            userId: body.userId ? String(body.userId) : undefined,
+            code: String(body.employeeCode || ''),
+            name: String(body.employeeName || ''),
+          };
+          resolvedUser = findLinkedUserForEmployee(empCandidate, mappedUsers) || resolvedUser;
+        }
+      } else if (dbRow) {
+        resolvedUser = mapSupabaseUserRow(dbRow);
+        indexUserInMfgCache(resolvedUser);
+      }
+    } catch {
+      // Fall back safely to cached user / officeLocationsStore / body
+    }
+  }
+
+  // 2. Resolve assigned office master record (User's assignedOfficeId takes priority)
+  const officeId = String(resolvedUser?.assignedOfficeId || body.assignedOfficeId || body.officeId || '').trim();
+  let storedOffice = officeId && officeId !== 'custom' ? officeLocationsStore.get(officeId) : undefined;
+
+  if (!storedOffice && serverSupabase && officeId && officeId !== 'custom') {
     try {
       const { data } = await serverSupabase
         .from('office_locations')
@@ -206,70 +368,45 @@ async function resolveOfficeForEmployee(body: any): Promise<ResolvedOfficeConfig
     }
   }
 
-  // 2. Also inspect employee record from Supabase field_force_reps if available
-  let dbRepOffice: Partial<ResolvedOfficeConfig> | null = null;
-  if (serverSupabase && body.employeeId) {
-    try {
-      const empIdNum = Number(body.employeeId);
-      const query = !isNaN(empIdNum)
-        ? serverSupabase.from('field_force_reps').select('*').eq('id', empIdNum).maybeSingle()
-        : serverSupabase
-            .from('field_force_reps')
-            .select('*')
-            .eq('code', body.employeeCode || body.employeeId)
-            .maybeSingle();
-      const { data: repRow } = await query;
-      if (repRow && isValidCoordinatePair(Number(repRow.office_latitude), Number(repRow.office_longitude))) {
-        dbRepOffice = {
-          assignedOfficeId: repRow.assigned_office_id || officeId || 'custom',
-          assignedOfficeName: repRow.assigned_office_name || 'Assigned Office',
-          officeAddress: repRow.office_address || '',
-          officeLatitude: Number(repRow.office_latitude),
-          officeLongitude: Number(repRow.office_longitude),
-          allowedRadiusMeters: Number(repRow.allowed_radius_meters) || DEFAULT_ALLOWED_RADIUS_METERS,
-          locationStatus: repRow.location_status === 'Inactive' ? 'Inactive' : 'Active',
-        };
-      }
-    } catch {
-      // Ignore missing column errors
-    }
-  }
+  const hasValidUserCoords =
+    resolvedUser &&
+    typeof resolvedUser.officeLatitude === 'number' &&
+    typeof resolvedUser.officeLongitude === 'number' &&
+    isValidCoordinatePair(resolvedUser.officeLatitude, resolvedUser.officeLongitude);
 
-  const officeLatitude =
-    dbRepOffice?.officeLatitude ??
-    storedOffice?.latitude ??
-    Number(body.officeLatitude);
-  const officeLongitude =
-    dbRepOffice?.officeLongitude ??
-    storedOffice?.longitude ??
-    Number(body.officeLongitude);
+  const officeLatitude = hasValidUserCoords
+    ? Number(resolvedUser!.officeLatitude)
+    : storedOffice?.latitude ?? Number(body.officeLatitude);
+  const officeLongitude = hasValidUserCoords
+    ? Number(resolvedUser!.officeLongitude)
+    : storedOffice?.longitude ?? Number(body.officeLongitude);
 
   const allowedRadiusMeters =
-    Number(dbRepOffice?.allowedRadiusMeters) ||
+    (Number(resolvedUser?.allowedRadiusMeters) > 0 ? Number(resolvedUser!.allowedRadiusMeters) : 0) ||
     Number(storedOffice?.allowedRadiusMeters) ||
     Number(body.allowedRadiusMeters) ||
     DEFAULT_ALLOWED_RADIUS_METERS;
 
   const assignedOfficeId =
-    dbRepOffice?.assignedOfficeId ||
+    resolvedUser?.assignedOfficeId ||
     storedOffice?.id ||
     officeId ||
     'office-hq';
 
   const assignedOfficeName =
-    dbRepOffice?.assignedOfficeName ||
+    resolvedUser?.assignedOfficeName ||
     storedOffice?.name ||
     body.assignedOfficeName ||
     'Head Office';
 
   const officeAddress =
-    dbRepOffice?.officeAddress ||
+    resolvedUser?.officeAddress ||
     storedOffice?.address ||
     body.officeAddress ||
     '';
 
-  const locationStatus =
-    dbRepOffice?.locationStatus ||
+  const locationStatus: 'Active' | 'Inactive' =
+    resolvedUser?.locationStatus ||
     storedOffice?.status ||
     (body.locationStatus === 'Inactive' ? 'Inactive' : 'Active');
 
@@ -587,7 +724,12 @@ export function createAppServer() {
   // --------------------------------------------------------------------------
   app.post('/api/attendance/validate', async (req, res) => {
     const body = req.body || {};
-    const office = await resolveOfficeForEmployee(body);
+    const caller = await resolveRequestUser(req).catch(() => null);
+    const office = await resolveOfficeForEmployee({
+      ...body,
+      user: body.user || caller || undefined,
+      userId: body.userId || caller?.id,
+    });
     const result = evaluateGeofenceAttendance({
       employeeLatitude: Number(body.latitude),
       employeeLongitude: Number(body.longitude),
@@ -673,10 +815,12 @@ export function createAppServer() {
 
     const bodyForOffice = {
       ...body,
+      user: caller,
+      userId: caller.id,
       employeeId,
       employeeCode,
       employeeName,
-      assignedOfficeId: body.assignedOfficeId || resolvedEmployee.assignedOfficeId,
+      assignedOfficeId: body.assignedOfficeId || caller.assignedOfficeId || resolvedEmployee.assignedOfficeId,
     };
 
     const attendanceDate = String(body.date || getTodayDateString()).slice(0, 10);
@@ -761,13 +905,30 @@ export function createAppServer() {
       timestampMs: Date.now(),
     });
 
+    const resolvedShiftStart =
+      (isMobileSource
+        ? caller.shiftStartTime || resolvedEmployee.shiftStartTime || body.shiftStartTime
+        : body.shiftStartTime || caller.shiftStartTime || resolvedEmployee.shiftStartTime) ||
+      payrollSettingsStore.shiftStartTime ||
+      DEFAULT_SHIFT_START_TIME;
+    const resolvedGraceMinutes =
+      isMobileSource
+        ? caller.gracePeriodMinutes ??
+          resolvedEmployee.gracePeriodMinutes ??
+          (body.gracePeriodMinutes !== undefined ? Number(body.gracePeriodMinutes) : undefined) ??
+          payrollSettingsStore.lateGracePeriodMinutes ??
+          DEFAULT_GRACE_PERIOD_MINUTES
+        : body.gracePeriodMinutes !== undefined
+        ? Number(body.gracePeriodMinutes)
+        : caller.gracePeriodMinutes ??
+          resolvedEmployee.gracePeriodMinutes ??
+          payrollSettingsStore.lateGracePeriodMinutes ??
+          DEFAULT_GRACE_PERIOD_MINUTES;
+
     const shiftCalc = calculateShiftAttendanceStatus({
       checkInTime,
-      shiftStartTime: body.shiftStartTime || DEFAULT_SHIFT_START_TIME,
-      gracePeriodMinutes:
-        body.gracePeriodMinutes !== undefined
-          ? Number(body.gracePeriodMinutes)
-          : DEFAULT_GRACE_PERIOD_MINUTES,
+      shiftStartTime: resolvedShiftStart,
+      gracePeriodMinutes: resolvedGraceMinutes,
       standardDailyHours: Number(body.standardDailyHours) || 8,
     });
 
@@ -920,10 +1081,12 @@ export function createAppServer() {
 
     const office = await resolveOfficeForEmployee({
       ...body,
+      user: caller,
+      userId: caller.id,
       employeeId,
       employeeCode,
       employeeName,
-      assignedOfficeId: body.assignedOfficeId || resolvedEmployee.assignedOfficeId,
+      assignedOfficeId: body.assignedOfficeId || caller.assignedOfficeId || resolvedEmployee.assignedOfficeId,
     });
     const empLat = Number(body.latitude);
     const empLng = Number(body.longitude);
@@ -992,14 +1155,31 @@ export function createAppServer() {
     });
 
     const checkInTimeStr = existing.checkInTime || existing.inTime || '09:00';
+    const resolvedShiftStartOut =
+      (isMobileSource
+        ? caller.shiftStartTime || resolvedEmployee.shiftStartTime || body.shiftStartTime
+        : body.shiftStartTime || caller.shiftStartTime || resolvedEmployee.shiftStartTime) ||
+      payrollSettingsStore.shiftStartTime ||
+      DEFAULT_SHIFT_START_TIME;
+    const resolvedGraceOut =
+      isMobileSource
+        ? caller.gracePeriodMinutes ??
+          resolvedEmployee.gracePeriodMinutes ??
+          (body.gracePeriodMinutes !== undefined ? Number(body.gracePeriodMinutes) : undefined) ??
+          payrollSettingsStore.lateGracePeriodMinutes ??
+          DEFAULT_GRACE_PERIOD_MINUTES
+        : body.gracePeriodMinutes !== undefined
+        ? Number(body.gracePeriodMinutes)
+        : caller.gracePeriodMinutes ??
+          resolvedEmployee.gracePeriodMinutes ??
+          payrollSettingsStore.lateGracePeriodMinutes ??
+          DEFAULT_GRACE_PERIOD_MINUTES;
+
     const shiftCalc = calculateShiftAttendanceStatus({
       checkInTime: checkInTimeStr,
       checkOutTime,
-      shiftStartTime: body.shiftStartTime || DEFAULT_SHIFT_START_TIME,
-      gracePeriodMinutes:
-        body.gracePeriodMinutes !== undefined
-          ? Number(body.gracePeriodMinutes)
-          : DEFAULT_GRACE_PERIOD_MINUTES,
+      shiftStartTime: resolvedShiftStartOut,
+      gracePeriodMinutes: resolvedGraceOut,
       standardDailyHours: Number(body.standardDailyHours) || 8,
     });
 
@@ -1066,8 +1246,6 @@ export function createAppServer() {
   const erpActiveSessions = new Map<string, { user: any; createdAt: number; expiresAt: number }>();
   const revokedSessionTokens = new Set<string>();
 
-  const mfgUsersCache = new Map<string, any>();
-  const fieldForceRepsCache = new Map<string, FieldForceRep>();
   const mfgOrdersCache = new Map<string, any>();
   const mfgIssuesCache = new Map<string, any>();
   const mfgRawMaterialsCache = new Map<string, any>();
@@ -1175,50 +1353,9 @@ export function createAppServer() {
     }
   };
 
-  const indexUserInMfgCache = (u: any) => {
-    if (!u || typeof u !== 'object') return;
-    if (u.id) mfgUsersCache.set(String(u.id).toLowerCase(), u);
-    if (u.userId) mfgUsersCache.set(String(u.userId).toLowerCase(), u);
-    if (u.uid) mfgUsersCache.set(String(u.uid).toLowerCase(), u);
-    if (u.salesmanCode) mfgUsersCache.set(String(u.salesmanCode).toLowerCase(), u);
-    if (u.email) mfgUsersCache.set(String(u.email).toLowerCase(), u);
-  };
-
   const indexFieldForceRepInCache = (rep: any) => {
     if (!rep || typeof rep !== 'object' || !rep.id) return;
     fieldForceRepsCache.set(String(rep.id), rep as FieldForceRep);
-  };
-
-  const mapSupabaseUserRow = (row: any) => {
-    let parsedPermissions = row.permissions;
-    if (typeof parsedPermissions === 'string') {
-      try {
-        parsedPermissions = JSON.parse(parsedPermissions);
-      } catch {
-        parsedPermissions = null;
-      }
-    }
-    return {
-      id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
-      userId:
-        row.user_id ||
-        row.uid ||
-        (row.email ? String(row.email).split('@')[0].toUpperCase() : `EMP-${row.id}`),
-      name: row.name || 'Staff User',
-      email: row.email || '',
-      phone: row.phone || '',
-      role: row.role || 'Field Force',
-      designation: row.designation || '',
-      department: row.department || '',
-      region: row.region || '',
-      area: row.area || '',
-      territory: row.territory || '',
-      isSalesman: row.is_salesman,
-      salesmanCode: row.salesman_code || row.salesmancode || undefined,
-      monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
-      status: row.status || 'Active',
-      permissions: parsedPermissions || {},
-    };
   };
 
   const mapSupabaseFieldForceRow = (row: any): FieldForceRep => ({
@@ -1240,25 +1377,6 @@ export function createAppServer() {
     tadaApproverName: row.tada_approver_name || undefined,
     monthlyTargetBDT: Number(row.monthly_target_bdt) || 0,
     monthlyAchievedBDT: Number(row.monthly_achieved_bdt) || 0,
-    assignedOfficeId: row.assigned_office_id || undefined,
-    assignedOfficeName: row.assigned_office_name || row.branch_workplace || undefined,
-    officeLatitude:
-      row.office_latitude !== null && row.office_latitude !== undefined
-        ? Number(row.office_latitude)
-        : undefined,
-    officeLongitude:
-      row.office_longitude !== null && row.office_longitude !== undefined
-        ? Number(row.office_longitude)
-        : undefined,
-    allowedRadiusMeters: Number(row.allowed_radius_meters) || undefined,
-    officeAddress: row.office_address || undefined,
-    locationStatus: row.location_status === 'Inactive' ? 'Inactive' : 'Active',
-    shiftStartTime: row.shift_start_time || undefined,
-    shiftEndTime: row.shift_end_time || undefined,
-    gracePeriodMinutes:
-      row.grace_period_minutes !== null && row.grace_period_minutes !== undefined
-        ? Number(row.grace_period_minutes)
-        : undefined,
     isActive: row.is_active !== false,
     status: row.is_active === false ? 'Inactive' : 'Active',
   });
@@ -1609,12 +1727,8 @@ export function createAppServer() {
             employeeCategory: row.employee_category || row.employeeCategory,
             status: row.status || 'Active',
             isActive: row.is_active !== false,
-            assignedOfficeId: row.assigned_office_id || row.assignedOfficeId,
-            assignedOfficeName: row.assigned_office_name || row.assignedOfficeName,
             branchWorkplace: row.branch_workplace || row.branchWorkplace,
-            shiftStartTime: row.shift_start_time || row.shiftStartTime,
-            shiftEndTime: row.shift_end_time || row.shiftEndTime,
-            gracePeriodMinutes: row.grace_period_minutes ?? row.gracePeriodMinutes,
+            userId: row.user_id ? String(row.user_id) : undefined,
           } as FieldForceRep;
           indexFieldForceRepInCache(resolvedRep);
         }
@@ -1740,16 +1854,34 @@ export function createAppServer() {
         }
       }
 
-      const shiftStartTime =
-        resolvedRep!.shiftStartTime || payrollSettingsStore.shiftStartTime || DEFAULT_SHIFT_START_TIME;
-      const gracePeriodMinutes =
-        resolvedRep!.gracePeriodMinutes ??
-        payrollSettingsStore.lateGracePeriodMinutes ??
-        DEFAULT_GRACE_PERIOD_MINUTES;
-      const standardDailyHours =
-        payrollSettingsStore.standardDailyHours ||
-        payrollSettingsStore.standardWorkHoursPerDay ||
-        8;
+      let linkedQrUser = findLinkedUserForEmployee(
+        resolvedRep!,
+        Array.from(mfgUsersCache.values())
+      );
+      if (!linkedQrUser && serverSupabase) {
+        try {
+          const { data: userRows } = await serverSupabase.from('users').select('*');
+          if (Array.isArray(userRows)) {
+            const mappedUsers = userRows.map(mapSupabaseUserRow);
+            for (const mu of mappedUsers) {
+              indexUserInMfgCache(mu);
+            }
+            linkedQrUser = findLinkedUserForEmployee(resolvedRep!, mappedUsers);
+          }
+        } catch {
+          // Use cached user/settings fallback
+        }
+      }
+      const qrGeoCfg = resolveGeofenceConfigFromUser(
+        linkedQrUser,
+        Array.from(officeLocationsStore.values()),
+        payrollSettingsStore,
+        resolvedRep!.branchWorkplace
+      );
+
+      const shiftStartTime = qrGeoCfg.shiftStartTime;
+      const gracePeriodMinutes = qrGeoCfg.gracePeriodMinutes;
+      const standardDailyHours = qrGeoCfg.standardDailyHours;
 
       const existingIn = String(existing?.inTime || existing?.checkInTime || '').trim();
       const existingOut = String(existing?.outTime || existing?.checkOutTime || '').trim();
@@ -1772,7 +1904,7 @@ export function createAppServer() {
 
         nextRecord = {
           id: existing?.id || `att-qr-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 5)}`,
-          userId: caller.id,
+          userId: linkedQrUser?.id || caller.id,
           fieldForceId: resolvedRep!.id,
           employeeId: resolvedRep!.id,
           employeeCode: resolvedRep!.code || undefined,
@@ -1780,8 +1912,8 @@ export function createAppServer() {
           employeeCategory: resolvedRep!.employeeCategory as AttendanceRecord['employeeCategory'],
           department: resolvedRep!.department || 'Operations',
           designation: resolvedRep!.designation,
-          assignedOfficeId: resolvedRep!.assignedOfficeId,
-          assignedOfficeName: resolvedRep!.assignedOfficeName || resolvedRep!.branchWorkplace,
+          assignedOfficeId: qrGeoCfg.assignedOfficeId,
+          assignedOfficeName: qrGeoCfg.assignedOfficeName,
           date: attendanceDate,
           status: shiftCalc.status,
           inTime: scanTime24,

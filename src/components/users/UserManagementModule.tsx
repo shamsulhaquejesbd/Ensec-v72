@@ -45,6 +45,14 @@ import {
   resolveUserPermissions,
 } from '../../types/erp.ts';
 import { PageWisePermissionsEditor } from './PageWisePermissionsEditor.tsx';
+import {
+  AssignedOfficeGeofenceFields,
+  EMPTY_USER_GEOFENCE_FORM,
+  UserGeofenceFormState,
+  geofenceFormStateToUserFields,
+  userToGeofenceFormState,
+  validateUserGeofenceForm,
+} from './AssignedOfficeGeofenceFields.tsx';
 
 export const UserManagementModule: React.FC = () => {
   const {
@@ -59,6 +67,7 @@ export const UserManagementModule: React.FC = () => {
     refreshUsers,
     clearUsersLocalData,
     syncAllUsersToSupabase,
+    officeLocations,
   } = useERP();
 
   const [activeTab, setActiveTab] = useState<'users' | 'salesmen' | 'matrix'>('users');
@@ -103,6 +112,14 @@ export const UserManagementModule: React.FC = () => {
   const [selectedFeatures, setSelectedFeatures] = useState<FeaturePermissions>(
     getDefaultPermissionsForRole('Field Force').features
   );
+  const [createGeofence, setCreateGeofence] = useState<UserGeofenceFormState>(() => ({
+    ...EMPTY_USER_GEOFENCE_FORM,
+  }));
+  const [createGeofenceError, setCreateGeofenceError] = useState<string | null>(null);
+  const [editGeofence, setEditGeofence] = useState<UserGeofenceFormState>(() => ({
+    ...EMPTY_USER_GEOFENCE_FORM,
+  }));
+  const [editGeofenceError, setEditGeofenceError] = useState<string | null>(null);
 
   // Edit Permissions Modal State
   const [editAllowedModules, setEditAllowedModules] = useState<PageModuleId[]>([]);
@@ -147,8 +164,26 @@ export const UserManagementModule: React.FC = () => {
     setSelectedUserForPermissions(null);
   };
 
+  const openCreateModal = () => {
+    setCreateGeofence({ ...EMPTY_USER_GEOFENCE_FORM });
+    setCreateGeofenceError(null);
+    setShowCreateModal(true);
+  };
+
+  const openEditUserModal = (user: User) => {
+    setSelectedUserForEdit({ ...user });
+    setEditGeofence(userToGeofenceFormState(user, officeLocations));
+    setEditGeofenceError(null);
+  };
+
   const handleCreateUser = (e: React.FormEvent) => {
     e.preventDefault();
+    const geofenceErr = validateUserGeofenceForm(createGeofence);
+    if (geofenceErr) {
+      setCreateGeofenceError(geofenceErr);
+      return;
+    }
+    setCreateGeofenceError(null);
 
     let perms: UserPermissions;
     if (presetType === 'full' || newUserRole === 'Super Admin') {
@@ -164,6 +199,7 @@ export const UserManagementModule: React.FC = () => {
 
     const code = salesmanCode || (isSalesman ? `REP-DHK-${Math.floor(100 + Math.random() * 900)}` : undefined);
     const assignedUserId = newUserId.trim().toUpperCase() || `EMP-${Math.floor(100 + Math.random() * 900)}`;
+    const geofenceFields = geofenceFormStateToUserFields(createGeofence);
 
     addUser({
       userId: assignedUserId,
@@ -182,21 +218,44 @@ export const UserManagementModule: React.FC = () => {
       salesmanCode: code,
       monthlySalesTargetBDT: isSalesman ? Number(salesTargetBDT) : undefined,
       permissions: perms,
+      ...geofenceFields,
     });
 
     setShowCreateModal(false);
+    setActionNotice({
+      type: 'success',
+      message: `Created user account ${newUserName || assignedUserId} with Office GPS & Geofence configuration.`,
+    });
+    setTimeout(() => setActionNotice(null), 4000);
     // Reset form
     setNewUserId('');
     setNewUserPassword('ensec2026');
     setNewUserName('');
     setNewUserEmail('');
     setNewUserPhone('');
+    setCreateGeofence({ ...EMPTY_USER_GEOFENCE_FORM });
+    setCreateGeofenceError(null);
   };
 
   const handleUpdateProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedUserForEdit) return;
-    updateUser(selectedUserForEdit.id, selectedUserForEdit);
+    const geofenceErr = validateUserGeofenceForm(editGeofence);
+    if (geofenceErr) {
+      setEditGeofenceError(geofenceErr);
+      return;
+    }
+    setEditGeofenceError(null);
+    const geofenceFields = geofenceFormStateToUserFields(editGeofence);
+    updateUser(selectedUserForEdit.id, {
+      ...selectedUserForEdit,
+      ...geofenceFields,
+    });
+    setActionNotice({
+      type: 'success',
+      message: `Updated user profile & Office GPS Geofence settings for ${selectedUserForEdit.name}.`,
+    });
+    setTimeout(() => setActionNotice(null), 4000);
     setSelectedUserForEdit(null);
   };
 
@@ -352,7 +411,7 @@ export const UserManagementModule: React.FC = () => {
           )}
 
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={openCreateModal}
             className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition-colors shadow-sm shrink-0 cursor-pointer"
           >
             <UserPlus className="w-4 h-4" />
@@ -493,7 +552,7 @@ export const UserManagementModule: React.FC = () => {
                         <div className="flex items-center gap-2 mt-2">
                           <button
                             type="button"
-                            onClick={() => setShowCreateModal(true)}
+                            onClick={openCreateModal}
                             className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs"
                           >
                             <UserPlus className="w-3.5 h-3.5" />
@@ -634,9 +693,9 @@ export const UserManagementModule: React.FC = () => {
                           </button>
 
                           <button
-                            onClick={() => setSelectedUserForEdit(user)}
+                            onClick={() => openEditUserModal(user)}
                             className="p-1 rounded-lg text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                            title="Edit Profile Info"
+                            title="Edit Profile & Office GPS Geofence"
                           >
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
@@ -681,7 +740,7 @@ export const UserManagementModule: React.FC = () => {
                 onClick={() => {
                   setIsSalesman(true);
                   setNewUserRole('Field Force');
-                  setShowCreateModal(true);
+                  openCreateModal();
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition-colors shadow-sm self-start sm:self-auto"
               >
@@ -704,7 +763,7 @@ export const UserManagementModule: React.FC = () => {
                   onClick={() => {
                     setIsSalesman(true);
                     setNewUserRole('Field Force');
-                    setShowCreateModal(true);
+                    openCreateModal();
                   }}
                   className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer shadow-xs mt-1"
                 >
@@ -827,7 +886,7 @@ export const UserManagementModule: React.FC = () => {
       {/* MODAL 2: CREATE NEW USER OR SALESMAN */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="relative w-full max-w-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 text-xs max-h-[90vh] overflow-y-auto">
+          <div className="relative w-full max-w-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 text-xs max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <UserPlus className="w-5 h-5 text-blue-600 dark:text-blue-400" />
@@ -1064,6 +1123,17 @@ export const UserManagementModule: React.FC = () => {
                 </div>
               </div>
 
+              {/* Section 6: Assigned Office GPS Location & Shift Geofence */}
+              <AssignedOfficeGeofenceFields
+                value={createGeofence}
+                onChange={(next) => {
+                  setCreateGeofence(next);
+                  if (createGeofenceError) setCreateGeofenceError(null);
+                }}
+                officeLocations={officeLocations}
+                validationError={createGeofenceError}
+              />
+
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
                 <button
                   type="button"
@@ -1088,15 +1158,15 @@ export const UserManagementModule: React.FC = () => {
       {/* MODAL 3: EDIT PROFILE INFO */}
       {selectedUserForEdit && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 text-xs">
+          <div className="relative w-full max-w-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 text-xs max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-base text-slate-900 dark:text-white">Edit User Profile</h3>
+              <h3 className="font-bold text-base text-slate-900 dark:text-white">Edit User Profile &amp; Office Geofence</h3>
               <button onClick={() => setSelectedUserForEdit(null)} className="text-slate-400 font-bold">
                 ✕
               </button>
             </div>
 
-            <form onSubmit={handleUpdateProfile} className="space-y-3">
+            <form onSubmit={handleUpdateProfile} className="space-y-4">
               <div className="grid grid-cols-2 gap-3 p-2.5 rounded-xl bg-blue-50/50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50">
                 <div>
                   <label className="font-semibold text-blue-900 dark:text-blue-300 block mb-1">Staff User ID</label>
@@ -1119,59 +1189,73 @@ export const UserManagementModule: React.FC = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Full Name</label>
-                <input
-                  type="text"
-                  value={selectedUserForEdit.name}
-                  onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, name: e.target.value })}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    value={selectedUserForEdit.name}
+                    onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, name: e.target.value })}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Phone</label>
+                  <input
+                    type="text"
+                    value={selectedUserForEdit.phone || ''}
+                    onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, phone: e.target.value })}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Designation</label>
+                  <input
+                    type="text"
+                    value={selectedUserForEdit.designation || ''}
+                    onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, designation: e.target.value })}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Territory</label>
+                  <input
+                    type="text"
+                    value={selectedUserForEdit.territory || ''}
+                    onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, territory: e.target.value })}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Account Status</label>
+                  <select
+                    value={selectedUserForEdit.status}
+                    onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, status: e.target.value as any })}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                  >
+                    <option value="Active">Active</option>
+                    <option value="Inactive">Inactive (Suspended)</option>
+                  </select>
+                </div>
               </div>
 
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Phone</label>
-                <input
-                  type="text"
-                  value={selectedUserForEdit.phone}
-                  onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, phone: e.target.value })}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
+              {/* Section 6: Assigned Office GPS Location & Shift Geofence */}
+              <AssignedOfficeGeofenceFields
+                value={editGeofence}
+                onChange={(next) => {
+                  setEditGeofence(next);
+                  if (editGeofenceError) setEditGeofenceError(null);
+                }}
+                officeLocations={officeLocations}
+                userLabel={`${selectedUserForEdit.name}${selectedUserForEdit.userId ? ` (${selectedUserForEdit.userId})` : ''}`}
+                validationError={editGeofenceError}
+              />
 
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Designation</label>
-                <input
-                  type="text"
-                  value={selectedUserForEdit.designation}
-                  onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, designation: e.target.value })}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Territory</label>
-                <input
-                  type="text"
-                  value={selectedUserForEdit.territory || ''}
-                  onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, territory: e.target.value })}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Account Status</label>
-                <select
-                  value={selectedUserForEdit.status}
-                  onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, status: e.target.value as any })}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                >
-                  <option value="Active">Active</option>
-                  <option value="Inactive">Inactive (Suspended)</option>
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
                 <button
                   type="button"
                   onClick={() => setSelectedUserForEdit(null)}

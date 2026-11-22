@@ -3,6 +3,7 @@ import type { OfficeLocation } from '../types/payroll.ts';
 import {
   DEFAULT_ALLOWED_RADIUS_METERS,
   DEFAULT_GRACE_PERIOD_MINUTES,
+  DEFAULT_MAX_GPS_ACCURACY_METERS,
   DEFAULT_OFFICE_LOCATIONS,
   DEFAULT_SHIFT_END_TIME,
   DEFAULT_SHIFT_START_TIME,
@@ -129,7 +130,168 @@ function isMockOrTestEmployeeRecord(rep: Partial<FieldForceRep> | null | undefin
 }
 
 /**
+ * Deterministically finds the linked User record for an Employee (FieldForceRep).
+ * Returns undefined if no user relationship exists.
+ */
+export function findLinkedUserForEmployee(
+  employee: Partial<FieldForceRep> | null | undefined,
+  users: Partial<User>[] = []
+): Partial<User> | undefined {
+  if (!employee || !Array.isArray(users) || users.length === 0) return undefined;
+
+  const repUserIdNorm = normalizeCode(employee.userId);
+  const repIdNorm = normalizeCode(employee.id);
+  const repCodeNorm = normalizeCode(employee.code);
+  const repEmpIdNorm = normalizeCode(employee.employeeId);
+  const repEmailNorm = normalizeCode(employee.email);
+  const repPhoneNorm = normalizePhoneDigits(employee.phone);
+  const repNameNorm = normalizeCode(employee.name);
+
+  if (repUserIdNorm) {
+    const byUserId = users.find((u) => {
+      const uid = normalizeCode(u.id);
+      const uLogin = normalizeCode(u.userId);
+      const uSalesman = normalizeCode(u.salesmanCode);
+      return uid === repUserIdNorm || uLogin === repUserIdNorm || (uSalesman && uSalesman === repUserIdNorm);
+    });
+    if (byUserId) return byUserId;
+  }
+
+  const byCodeOrEmpId = users.find((u) => {
+    const uEmpId = normalizeCode((u as any).employeeId);
+    const uSalesman = normalizeCode(u.salesmanCode);
+    const uLogin = normalizeCode(u.userId);
+    const uId = normalizeCode(u.id);
+    if (uEmpId && (uEmpId === repIdNorm || (repCodeNorm && uEmpId === repCodeNorm) || (repEmpIdNorm && uEmpId === repEmpIdNorm))) {
+      return true;
+    }
+    if (uSalesman && repCodeNorm && uSalesman === repCodeNorm) return true;
+    if (uLogin && repCodeNorm && uLogin === repCodeNorm) return true;
+    if (uId && repIdNorm && uId === repIdNorm) return true;
+    return false;
+  });
+  if (byCodeOrEmpId) return byCodeOrEmpId;
+
+  if (repEmailNorm) {
+    const byEmail = users.find((u) => u.email && normalizeCode(u.email) === repEmailNorm);
+    if (byEmail) return byEmail;
+  }
+
+  if (repPhoneNorm && repPhoneNorm.length >= 8) {
+    const byPhone = users.find((u) => {
+      const up = normalizePhoneDigits(u.phone);
+      return up && up.length >= 8 && up === repPhoneNorm;
+    });
+    if (byPhone) return byPhone;
+  }
+
+  if (repNameNorm) {
+    const byName = users.find((u) => u.name && normalizeCode(u.name) === repNameNorm);
+    if (byName) return byName;
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolves GPS Location & Shift Geofence settings strictly from User-owned configuration
+ * (with fallback to OfficeLocation master and system defaults).
+ */
+export function resolveGeofenceConfigFromUser(
+  user: Partial<User> | null | undefined,
+  officeLocations: OfficeLocation[] = [],
+  payrollSettings?: {
+    shiftStartTime?: string;
+    shiftEndTime?: string;
+    lateGracePeriodMinutes?: number;
+    standardDailyHours?: number;
+    standardWorkHoursPerDay?: number;
+    maxGpsAccuracyMeters?: number;
+  },
+  fallbackBranchName?: string
+) {
+  const activeOffices = (Array.isArray(officeLocations) ? officeLocations : []).filter(
+    (o) => o && o.status !== 'Inactive'
+  );
+  const fallbackOffice = activeOffices[0] || officeLocations[0] || DEFAULT_OFFICE_LOCATIONS[0];
+  const matchedOffice =
+    user?.assignedOfficeId && user.assignedOfficeId !== 'custom'
+      ? officeLocations.find((o) => o.id === user.assignedOfficeId) || fallbackOffice
+      : fallbackOffice;
+
+  const hasValidUserCoords =
+    user &&
+    typeof user.officeLatitude === 'number' &&
+    typeof user.officeLongitude === 'number' &&
+    isValidCoordinatePair(user.officeLatitude, user.officeLongitude);
+
+  const officeLatitude = hasValidUserCoords
+    ? Number(user!.officeLatitude)
+    : matchedOffice.latitude;
+  const officeLongitude = hasValidUserCoords
+    ? Number(user!.officeLongitude)
+    : matchedOffice.longitude;
+
+  const allowedRadiusMeters =
+    Number(user?.allowedRadiusMeters) > 0
+      ? Number(user!.allowedRadiusMeters)
+      : matchedOffice.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS;
+
+  const locationStatus: 'Active' | 'Inactive' =
+    user?.locationStatus === 'Inactive'
+      ? 'Inactive'
+      : user?.locationStatus === 'Active'
+      ? 'Active'
+      : matchedOffice.status || 'Active';
+
+  const userHasCustomDistantCoords =
+    hasValidUserCoords &&
+    calculateHaversineDistanceMeters(
+      officeLatitude,
+      officeLongitude,
+      matchedOffice.latitude,
+      matchedOffice.longitude
+    ) > 500;
+
+  const explicitUserAddress = String(user?.officeAddress || '').trim();
+  const officeAddress = String(
+    (userHasCustomDistantCoords
+      ? explicitUserAddress && explicitUserAddress !== matchedOffice.address
+        ? explicitUserAddress
+        : ''
+      : explicitUserAddress || matchedOffice.address) ||
+      matchedOffice.address ||
+      ''
+  ).trim();
+
+  return {
+    assignedOfficeId: String(user?.assignedOfficeId || matchedOffice.id || DEFAULT_OFFICE_LOCATIONS[0].id),
+    assignedOfficeName: String(
+      user?.assignedOfficeName ||
+        (user?.assignedOfficeId && user.assignedOfficeId !== 'custom' ? matchedOffice.name : '') ||
+        fallbackBranchName ||
+        matchedOffice.name ||
+        DEFAULT_OFFICE_LOCATIONS[0].name
+    ),
+    officeAddress,
+    officeLatitude,
+    officeLongitude,
+    allowedRadiusMeters,
+    locationStatus,
+    shiftStartTime: user?.shiftStartTime || payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
+    shiftEndTime: user?.shiftEndTime || payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
+    gracePeriodMinutes:
+      user?.gracePeriodMinutes !== undefined && user?.gracePeriodMinutes !== null
+        ? Number(user.gracePeriodMinutes)
+        : payrollSettings?.lateGracePeriodMinutes ?? DEFAULT_GRACE_PERIOD_MINUTES,
+    standardDailyHours: payrollSettings?.standardDailyHours || payrollSettings?.standardWorkHoursPerDay || 8,
+    maxGpsAccuracyMeters: payrollSettings?.maxGpsAccuracyMeters || DEFAULT_MAX_GPS_ACCURACY_METERS,
+  };
+}
+
+/**
  * Deterministically resolves the logged-in ERP user's employee profile.
+ * Reads Assigned Office GPS Location & Shift Geofence exclusively from the User record.
  * Returns null if no valid active ERP session user exists (never falls back to another employee).
  */
 export function resolveEmployeeForERPUser(
@@ -211,26 +373,12 @@ export function resolveEmployeeForERPUser(
     );
   }
 
-  const activeOffices = (Array.isArray(officeLocations) ? officeLocations : []).filter(
-    (o) => o && o.status !== 'Inactive'
+  const userGeofence = resolveGeofenceConfigFromUser(
+    user,
+    officeLocations,
+    undefined,
+    matchedRep?.branchWorkplace
   );
-  const fallbackOffice = activeOffices[0] || officeLocations[0] || DEFAULT_OFFICE_LOCATIONS[0];
-  const assignedOffice = matchedRep?.assignedOfficeId
-    ? officeLocations.find((o) => o.id === matchedRep.assignedOfficeId) || fallbackOffice
-    : fallbackOffice;
-
-  const hasValidRepCoords =
-    matchedRep &&
-    typeof matchedRep.officeLatitude === 'number' &&
-    typeof matchedRep.officeLongitude === 'number' &&
-    isValidCoordinatePair(matchedRep.officeLatitude, matchedRep.officeLongitude);
-
-  const officeLatitude = hasValidRepCoords
-    ? Number(matchedRep!.officeLatitude)
-    : assignedOffice.latitude;
-  const officeLongitude = hasValidRepCoords
-    ? Number(matchedRep!.officeLongitude)
-    : assignedOffice.longitude;
 
   const employeeCode =
     String(
@@ -254,25 +402,10 @@ export function resolveEmployeeForERPUser(
   const area = String(matchedRep?.area || user.area || '').trim();
   const territory = String(matchedRep?.territory || user.territory || '').trim();
 
-  const repHasCustomDistantCoords =
-    hasValidRepCoords &&
-    calculateHaversineDistanceMeters(
-      officeLatitude,
-      officeLongitude,
-      assignedOffice.latitude,
-      assignedOffice.longitude
-    ) > 500;
-
-  const explicitRepAddress = String(matchedRep?.officeAddress || '').trim();
-  const officeAddress = String(
-    (repHasCustomDistantCoords
-      ? explicitRepAddress && explicitRepAddress !== assignedOffice.address
-        ? explicitRepAddress
-        : [territory, area, region].filter(Boolean).join(', ')
-      : explicitRepAddress || assignedOffice.address) ||
-      [territory, area, region].filter(Boolean).join(', ') ||
-      department
-  ).trim();
+  const officeAddress =
+    userGeofence.officeAddress ||
+    [territory, area, region].filter(Boolean).join(', ') ||
+    department;
 
   return {
     userId: String(user.id),
@@ -290,24 +423,18 @@ export function resolveEmployeeForERPUser(
     area,
     territory,
     branchWorkplace: String(
-      matchedRep?.branchWorkplace || matchedRep?.assignedOfficeName || assignedOffice.name
+      user.assignedOfficeName || matchedRep?.branchWorkplace || userGeofence.assignedOfficeName
     ),
     officeAddress,
-    assignedOfficeId: String(matchedRep?.assignedOfficeId || assignedOffice.id),
-    assignedOfficeName: String(matchedRep?.assignedOfficeName || assignedOffice.name),
-    officeLatitude,
-    officeLongitude,
-    allowedRadiusMeters:
-      Number(matchedRep?.allowedRadiusMeters) > 0
-        ? Number(matchedRep!.allowedRadiusMeters)
-        : assignedOffice.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS,
-    locationStatus: matchedRep?.locationStatus === 'Inactive' ? 'Inactive' : 'Active',
-    shiftStartTime: matchedRep?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
-    shiftEndTime: matchedRep?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
-    gracePeriodMinutes:
-      matchedRep?.gracePeriodMinutes !== undefined
-        ? Number(matchedRep.gracePeriodMinutes)
-        : DEFAULT_GRACE_PERIOD_MINUTES,
+    assignedOfficeId: userGeofence.assignedOfficeId,
+    assignedOfficeName: userGeofence.assignedOfficeName,
+    officeLatitude: userGeofence.officeLatitude,
+    officeLongitude: userGeofence.officeLongitude,
+    allowedRadiusMeters: userGeofence.allowedRadiusMeters,
+    locationStatus: userGeofence.locationStatus,
+    shiftStartTime: userGeofence.shiftStartTime,
+    shiftEndTime: userGeofence.shiftEndTime,
+    gracePeriodMinutes: userGeofence.gracePeriodMinutes,
     monthlyTargetBDT:
       Number(matchedRep?.monthlyTargetBDT) || Number(user.monthlySalesTargetBDT) || Number(user.salesTargetBDT) || 0,
     monthlyAchievedBDT: Number(matchedRep?.monthlyAchievedBDT || matchedRep?.mtdAchievementBDT || 0),

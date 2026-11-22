@@ -102,6 +102,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             .maybeSingle();
 
           if (data) {
+            const rawPermsObj =
+              typeof data.permissions === 'string'
+                ? (() => {
+                    try {
+                      return JSON.parse(data.permissions);
+                    } catch {
+                      return null;
+                    }
+                  })()
+                : data.permissions;
+            const geoBridge =
+              rawPermsObj && typeof rawPermsObj === 'object' && rawPermsObj.geofence && typeof rawPermsObj.geofence === 'object'
+                ? rawPermsObj.geofence
+                : undefined;
+            const rawLat = data.office_latitude ?? geoBridge?.officeLatitude;
+            const rawLng = data.office_longitude ?? geoBridge?.officeLongitude;
+            const rawRadius = data.allowed_radius_meters ?? geoBridge?.allowedRadiusMeters;
+            const rawLocStatus = data.location_status ?? geoBridge?.locationStatus;
+            const rawGrace = data.grace_period_minutes ?? geoBridge?.gracePeriodMinutes;
+
             matchedUser = {
               id: data.uid ? String(data.uid) : `u-sb-${data.id}`,
               userId: data.user_id || data.uid || (data.email ? data.email.split('@')[0].toUpperCase() : `EMP-${data.id}`),
@@ -115,6 +135,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               role: (data.role as any) || 'Field Force',
               designation: data.designation || '',
               department: data.department || '',
+              region: data.region || '',
+              area: data.area || '',
+              territory: data.territory || '',
               status:
                 data.status === 'Inactive'
                   ? 'Inactive'
@@ -123,19 +146,34 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                   : 'Active',
               permissions: resolveUserPermissions({
                 role: (data.role as any) || 'Field Force',
-                permissions:
-                  typeof data.permissions === 'string'
-                    ? (() => {
-                        try {
-                          return JSON.parse(data.permissions);
-                        } catch {
-                          return null;
-                        }
-                      })()
-                    : data.permissions,
+                permissions: rawPermsObj,
               }),
               isSalesman: data.is_salesman,
               salesmanCode: data.salesman_code,
+              assignedOfficeId: data.assigned_office_id || geoBridge?.assignedOfficeId || undefined,
+              assignedOfficeName: data.assigned_office_name || geoBridge?.assignedOfficeName || undefined,
+              officeLatitude:
+                rawLat !== null && rawLat !== undefined && rawLat !== '' && Number.isFinite(Number(rawLat))
+                  ? Number(rawLat)
+                  : undefined,
+              officeLongitude:
+                rawLng !== null && rawLng !== undefined && rawLng !== '' && Number.isFinite(Number(rawLng))
+                  ? Number(rawLng)
+                  : undefined,
+              allowedRadiusMeters: Number(rawRadius) > 0 ? Number(rawRadius) : undefined,
+              officeAddress: data.office_address || geoBridge?.officeAddress || undefined,
+              locationStatus:
+                rawLocStatus === 'Inactive'
+                  ? 'Inactive'
+                  : rawLocStatus === 'Active'
+                  ? 'Active'
+                  : undefined,
+              shiftStartTime: data.shift_start_time || geoBridge?.shiftStartTime || undefined,
+              shiftEndTime: data.shift_end_time || geoBridge?.shiftEndTime || undefined,
+              gracePeriodMinutes:
+                rawGrace !== null && rawGrace !== undefined && rawGrace !== '' && Number.isFinite(Number(rawGrace))
+                  ? Number(rawGrace)
+                  : undefined,
             };
           }
         } catch (dbErr) {

@@ -185,7 +185,9 @@ import {
   AutomationExecutionReport,
 } from '../lib/installmentAutomation.ts';
 import {
+  findLinkedUserForEmployee,
   resolveEmployeeForERPUser,
+  resolveGeofenceConfigFromUser,
   type ResolvedMobileEmployeeProfile,
 } from '../lib/fieldForceAuth.ts';
 import { sendSMSViaGateway, compileTemplate } from '../lib/smsService.ts';
@@ -2594,11 +2596,15 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        users: users.map((u) => ({
+          ...u,
+          password: '',
+        })),
         fieldForceReps,
         payrollSettings,
       }),
     }).catch(() => {});
-  }, [fieldForceReps, payrollSettings]);
+  }, [users, fieldForceReps, payrollSettings]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -4241,11 +4247,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 latitude:
                   typeof row.current_location?.latitude === 'number'
                     ? row.current_location.latitude
-                    : (Number(row.current_latitude) || Number(row.office_latitude) || DEFAULT_OFFICE_LOCATIONS[0].latitude),
+                    : (Number(row.current_latitude) || DEFAULT_OFFICE_LOCATIONS[0].latitude),
                 longitude:
                   typeof row.current_location?.longitude === 'number'
                     ? row.current_location.longitude
-                    : (Number(row.current_longitude) || Number(row.office_longitude) || DEFAULT_OFFICE_LOCATIONS[0].longitude),
+                    : (Number(row.current_longitude) || DEFAULT_OFFICE_LOCATIONS[0].longitude),
                 address:
                   row.current_location?.address ||
                   row.last_known_address ||
@@ -4266,29 +4272,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               productiveVisitsCount: 0,
               isActive: row.is_active !== false,
               status: row.is_active === false ? 'Inactive' : 'Active',
-              // GPS Geofencing & Shift Configuration
-              assignedOfficeId: row.assigned_office_id || undefined,
-              assignedOfficeName: row.assigned_office_name || row.branch_workplace || undefined,
-              officeLatitude:
-                row.office_latitude !== null && row.office_latitude !== undefined
-                  ? Number(row.office_latitude)
-                  : undefined,
-              officeLongitude:
-                row.office_longitude !== null && row.office_longitude !== undefined
-                  ? Number(row.office_longitude)
-                  : undefined,
-              allowedRadiusMeters:
-                Number(row.allowed_radius_meters) > 0
-                  ? Number(row.allowed_radius_meters)
-                  : undefined,
-              officeAddress: row.office_address || undefined,
-              locationStatus: row.location_status === 'Inactive' ? 'Inactive' : row.location_status === 'Active' ? 'Active' : undefined,
-              shiftStartTime: row.shift_start_time || undefined,
-              shiftEndTime: row.shift_end_time || undefined,
-              gracePeriodMinutes:
-                row.grace_period_minutes !== null && row.grace_period_minutes !== undefined
-                  ? Number(row.grace_period_minutes)
-                  : undefined,
               isOvertimeEligible: row.is_overtime_eligible !== undefined ? Boolean(row.is_overtime_eligible) : (row.overtime_policy?.isEligible !== undefined ? Boolean(row.overtime_policy.isEligible) : true),
               overtimeCalculationBasis: row.overtime_calculation_basis || row.overtime_policy?.calculationBasis || 'Basic Salary',
               overtimeStandardMonthlyHours: Number(row.overtime_standard_hours) || Number(row.overtime_policy?.standardMonthlyWorkingHours) || 208,
@@ -5763,51 +5746,93 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .order('id', { ascending: true });
 
         if (!error && Array.isArray(data)) {
-          const mappedUsers: User[] = data.map((row: any) => ({
-            id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
-            userId:
-              row.user_id ||
-              row.uid ||
-              (row.email ? row.email.split('@')[0].toUpperCase() : `EMP-${row.id}`),
-            name: row.name || 'Staff User',
-            email: row.email || '',
-            password:
-              row.password !== undefined && row.password !== null && row.password !== ''
-                ? String(row.password)
-                : 'ensec2026',
-            phone: row.phone || '',
-            role: (row.role as any) || 'Field Force',
-            designation: row.designation || '',
-            department: row.department || '',
-            status:
-              row.status === 'Inactive'
-                ? 'Inactive'
-                : row.status === 'Blocked'
-                ? 'Blocked'
-                : 'Active',
-            avatar: row.avatar,
-            permissions: resolveUserPermissions({
+          const mappedUsers: User[] = data.map((row: any) => {
+            const rawPermsObj =
+              typeof row.permissions === 'string'
+                ? (() => {
+                    try {
+                      return JSON.parse(row.permissions);
+                    } catch {
+                      return null;
+                    }
+                  })()
+                : row.permissions;
+            const geoBridge =
+              rawPermsObj && typeof rawPermsObj === 'object' && rawPermsObj.geofence && typeof rawPermsObj.geofence === 'object'
+                ? rawPermsObj.geofence
+                : undefined;
+
+            const rawLat = row.office_latitude ?? geoBridge?.officeLatitude;
+            const rawLng = row.office_longitude ?? geoBridge?.officeLongitude;
+            const rawRadius = row.allowed_radius_meters ?? geoBridge?.allowedRadiusMeters;
+            const rawLocStatus = row.location_status ?? geoBridge?.locationStatus;
+            const rawGrace = row.grace_period_minutes ?? geoBridge?.gracePeriodMinutes;
+
+            return {
+              id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
+              userId:
+                row.user_id ||
+                row.uid ||
+                (row.email ? row.email.split('@')[0].toUpperCase() : `EMP-${row.id}`),
+              name: row.name || 'Staff User',
+              email: row.email || '',
+              password:
+                row.password !== undefined && row.password !== null && row.password !== ''
+                  ? String(row.password)
+                  : 'ensec2026',
+              phone: row.phone || '',
               role: (row.role as any) || 'Field Force',
-              permissions:
-                typeof row.permissions === 'string'
-                  ? (() => {
-                      try {
-                        return JSON.parse(row.permissions);
-                      } catch {
-                        return null;
-                      }
-                    })()
-                  : row.permissions,
-            }),
-            isSalesman:
-              row.is_salesman ??
-              (row.role === 'Field Force' ||
-                row.role === 'Sales Head' ||
-                row.role === 'Territory Sales Officer'),
-            salesmanCode: row.salesman_code || row.salesmancode,
-            monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
-            createdAt: row.created_at,
-          }));
+              designation: row.designation || '',
+              department: row.department || '',
+              region: row.region || '',
+              area: row.area || '',
+              territory: row.territory || '',
+              status:
+                row.status === 'Inactive'
+                  ? 'Inactive'
+                  : row.status === 'Blocked'
+                  ? 'Blocked'
+                  : 'Active',
+              avatar: row.avatar,
+              permissions: resolveUserPermissions({
+                role: (row.role as any) || 'Field Force',
+                permissions: rawPermsObj,
+              }),
+              isSalesman:
+                row.is_salesman ??
+                (row.role === 'Field Force' ||
+                  row.role === 'Sales Head' ||
+                  row.role === 'Territory Sales Officer'),
+              salesmanCode: row.salesman_code || row.salesmancode,
+              monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
+              assignedOfficeId: row.assigned_office_id || geoBridge?.assignedOfficeId || undefined,
+              assignedOfficeName: row.assigned_office_name || geoBridge?.assignedOfficeName || undefined,
+              officeLatitude:
+                rawLat !== null && rawLat !== undefined && rawLat !== '' && Number.isFinite(Number(rawLat))
+                  ? Number(rawLat)
+                  : undefined,
+              officeLongitude:
+                rawLng !== null && rawLng !== undefined && rawLng !== '' && Number.isFinite(Number(rawLng))
+                  ? Number(rawLng)
+                  : undefined,
+              allowedRadiusMeters:
+                Number(rawRadius) > 0 ? Number(rawRadius) : undefined,
+              officeAddress: row.office_address || geoBridge?.officeAddress || undefined,
+              locationStatus:
+                rawLocStatus === 'Inactive'
+                  ? 'Inactive'
+                  : rawLocStatus === 'Active'
+                  ? 'Active'
+                  : undefined,
+              shiftStartTime: row.shift_start_time || geoBridge?.shiftStartTime || undefined,
+              shiftEndTime: row.shift_end_time || geoBridge?.shiftEndTime || undefined,
+              gracePeriodMinutes:
+                rawGrace !== null && rawGrace !== undefined && rawGrace !== '' && Number.isFinite(Number(rawGrace))
+                  ? Number(rawGrace)
+                  : undefined,
+              createdAt: row.created_at,
+            };
+          });
 
           setUsers(mappedUsers);
           if (typeof window !== 'undefined') {
@@ -16515,16 +16540,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         overtime_policy_status: newRep.overtimePolicyStatus || 'Active',
         overtime_policy_notes: newRep.overtimePolicyNotes || null,
         overtime_policy_history: newRep.overtimePolicyHistory || [],
-        assigned_office_id: newRep.assignedOfficeId || null,
-        assigned_office_name: newRep.assignedOfficeName || null,
-        office_latitude: newRep.officeLatitude ?? null,
-        office_longitude: newRep.officeLongitude ?? null,
-        allowed_radius_meters: newRep.allowedRadiusMeters ?? null,
-        office_address: newRep.officeAddress || null,
-        location_status: newRep.locationStatus || null,
-        shift_start_time: newRep.shiftStartTime || null,
-        shift_end_time: newRep.shiftEndTime || null,
-        grace_period_minutes: newRep.gracePeriodMinutes ?? null,
       };
 
       (async () => {
@@ -16661,16 +16676,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (updates.overtimePolicyStatus !== undefined) payload.overtime_policy_status = updates.overtimePolicyStatus;
       if (updates.overtimePolicyNotes !== undefined) payload.overtime_policy_notes = updates.overtimePolicyNotes;
       if (updates.overtimePolicyHistory !== undefined) payload.overtime_policy_history = updates.overtimePolicyHistory;
-      if (updates.assignedOfficeId !== undefined) payload.assigned_office_id = updates.assignedOfficeId || null;
-      if (updates.assignedOfficeName !== undefined) payload.assigned_office_name = updates.assignedOfficeName || null;
-      if (updates.officeLatitude !== undefined) payload.office_latitude = updates.officeLatitude ?? null;
-      if (updates.officeLongitude !== undefined) payload.office_longitude = updates.officeLongitude ?? null;
-      if (updates.allowedRadiusMeters !== undefined) payload.allowed_radius_meters = updates.allowedRadiusMeters ?? null;
-      if (updates.officeAddress !== undefined) payload.office_address = updates.officeAddress || null;
-      if (updates.locationStatus !== undefined) payload.location_status = updates.locationStatus || null;
-      if (updates.shiftStartTime !== undefined) payload.shift_start_time = updates.shiftStartTime || null;
-      if (updates.shiftEndTime !== undefined) payload.shift_end_time = updates.shiftEndTime || null;
-      if (updates.gracePeriodMinutes !== undefined) payload.grace_period_minutes = updates.gracePeriodMinutes ?? null;
 
       const execUpdate = (p: any) =>
         !isNaN(Number(repId))
@@ -17987,6 +17992,30 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Sync newly created user to Supabase if configured
     const sb = getSupabase();
     if (sb) {
+      const geoSnapshot = {
+        assignedOfficeId: newUser.assignedOfficeId || null,
+        assignedOfficeName: newUser.assignedOfficeName || null,
+        officeLatitude: newUser.officeLatitude ?? null,
+        officeLongitude: newUser.officeLongitude ?? null,
+        allowedRadiusMeters: newUser.allowedRadiusMeters ?? null,
+        officeAddress: newUser.officeAddress || null,
+        locationStatus: newUser.locationStatus || 'Active',
+        shiftStartTime: newUser.shiftStartTime || null,
+        shiftEndTime: newUser.shiftEndTime || null,
+        gracePeriodMinutes: newUser.gracePeriodMinutes ?? null,
+      };
+      const geofenceDedicatedCols = new Set([
+        'assigned_office_id',
+        'assigned_office_name',
+        'office_latitude',
+        'office_longitude',
+        'allowed_radius_meters',
+        'office_address',
+        'location_status',
+        'shift_start_time',
+        'shift_end_time',
+        'grace_period_minutes',
+      ]);
       const userPayload: any = {
         name: newUser.name,
         email: newUser.email,
@@ -17995,18 +18024,32 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         role: newUser.role,
         designation: newUser.designation || null,
         department: newUser.department || 'Operations',
+        region: newUser.region || null,
+        area: newUser.area || null,
+        territory: newUser.territory || null,
         status: newUser.status || 'Active',
         uid: newUser.userId || id,
         user_id: newUser.userId || id,
         is_salesman: Boolean(newUser.isSalesman),
         salesman_code: newUser.salesmanCode || null,
+        monthly_sales_target_bdt: newUser.monthlySalesTargetBDT ?? null,
+        assigned_office_id: geoSnapshot.assignedOfficeId,
+        assigned_office_name: geoSnapshot.assignedOfficeName,
+        office_latitude: geoSnapshot.officeLatitude,
+        office_longitude: geoSnapshot.officeLongitude,
+        allowed_radius_meters: geoSnapshot.allowedRadiusMeters,
+        office_address: geoSnapshot.officeAddress,
+        location_status: geoSnapshot.locationStatus,
+        shift_start_time: geoSnapshot.shiftStartTime,
+        shift_end_time: geoSnapshot.shiftEndTime,
+        grace_period_minutes: geoSnapshot.gracePeriodMinutes,
         permissions: newUser.permissions || {},
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
       (async () => {
         try {
-          for (let attempt = 0; attempt < 8; attempt++) {
+          for (let attempt = 0; attempt < 20; attempt++) {
             const { error: insErr } = await sb
               .from('users')
               .upsert(userPayload, { onConflict: 'email' });
@@ -18015,6 +18058,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               insErr.message.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation ["']?users["']? does not exist/i) ||
               insErr.message.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i);
             if (colMatch && colMatch[1] && colMatch[1] !== 'email') {
+              if (geofenceDedicatedCols.has(colMatch[1])) {
+                userPayload.permissions = {
+                  ...(typeof userPayload.permissions === 'object' && userPayload.permissions ? userPayload.permissions : {}),
+                  geofence: geoSnapshot,
+                };
+              }
               delete userPayload[colMatch[1]];
               continue;
             }
@@ -18030,12 +18079,17 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateUser = (userId: string, updates: Partial<User>) => {
+    const target = users.find((u) => u.id === userId);
+    const mergedTarget: User | undefined = target ? { ...target, ...updates } : undefined;
     setUsers((prev) =>
       prev.map((u) => {
         if (u.id === userId) {
           const updated = { ...u, ...updates };
           if (currentUser.id === userId) {
             setCurrentUser(updated);
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('ensec_erp_user', JSON.stringify(updated));
+            }
           }
           return updated;
         }
@@ -18047,36 +18101,99 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Sync profile updates to Supabase if configured
     const sb = getSupabase();
     if (sb) {
-      const target = users.find((u) => u.id === userId);
       const email = target?.email || (updates as any).email;
-      if (email) {
+      const uid = target?.userId || target?.id || userId;
+      if (email || uid) {
+        const geoSnapshot = {
+          assignedOfficeId: mergedTarget?.assignedOfficeId ?? updates.assignedOfficeId ?? null,
+          assignedOfficeName: mergedTarget?.assignedOfficeName ?? updates.assignedOfficeName ?? null,
+          officeLatitude: mergedTarget?.officeLatitude ?? updates.officeLatitude ?? null,
+          officeLongitude: mergedTarget?.officeLongitude ?? updates.officeLongitude ?? null,
+          allowedRadiusMeters: mergedTarget?.allowedRadiusMeters ?? updates.allowedRadiusMeters ?? null,
+          officeAddress: mergedTarget?.officeAddress ?? updates.officeAddress ?? null,
+          locationStatus: mergedTarget?.locationStatus ?? updates.locationStatus ?? 'Active',
+          shiftStartTime: mergedTarget?.shiftStartTime ?? updates.shiftStartTime ?? null,
+          shiftEndTime: mergedTarget?.shiftEndTime ?? updates.shiftEndTime ?? null,
+          gracePeriodMinutes: mergedTarget?.gracePeriodMinutes ?? updates.gracePeriodMinutes ?? null,
+        };
+        const geofenceDedicatedCols = new Set([
+          'assigned_office_id',
+          'assigned_office_name',
+          'office_latitude',
+          'office_longitude',
+          'allowed_radius_meters',
+          'office_address',
+          'location_status',
+          'shift_start_time',
+          'shift_end_time',
+          'grace_period_minutes',
+        ]);
+        const hasGeoUpdate =
+          updates.assignedOfficeId !== undefined ||
+          updates.assignedOfficeName !== undefined ||
+          updates.officeLatitude !== undefined ||
+          updates.officeLongitude !== undefined ||
+          updates.allowedRadiusMeters !== undefined ||
+          updates.officeAddress !== undefined ||
+          updates.locationStatus !== undefined ||
+          updates.shiftStartTime !== undefined ||
+          updates.shiftEndTime !== undefined ||
+          updates.gracePeriodMinutes !== undefined;
+
         const supaUpdates: any = {
           updated_at: new Date().toISOString(),
         };
         if (updates.name) supaUpdates.name = updates.name;
+        if (updates.email) supaUpdates.email = updates.email;
         if (updates.userId !== undefined) supaUpdates.user_id = updates.userId;
         if (updates.phone !== undefined) supaUpdates.phone = updates.phone;
         if (updates.role) supaUpdates.role = updates.role;
         if (updates.designation !== undefined) supaUpdates.designation = updates.designation;
         if (updates.department !== undefined) supaUpdates.department = updates.department;
+        if (updates.region !== undefined) supaUpdates.region = updates.region;
+        if (updates.area !== undefined) supaUpdates.area = updates.area;
+        if (updates.territory !== undefined) supaUpdates.territory = updates.territory;
         if (updates.status) supaUpdates.status = updates.status;
         if (updates.isSalesman !== undefined) supaUpdates.is_salesman = updates.isSalesman;
         if (updates.salesmanCode !== undefined) supaUpdates.salesman_code = updates.salesmanCode;
+        if (updates.monthlySalesTargetBDT !== undefined) supaUpdates.monthly_sales_target_bdt = updates.monthlySalesTargetBDT;
         if (updates.permissions) supaUpdates.permissions = updates.permissions;
         if (updates.password) supaUpdates.password = updates.password;
+        if (updates.assignedOfficeId !== undefined) supaUpdates.assigned_office_id = updates.assignedOfficeId || null;
+        if (updates.assignedOfficeName !== undefined) supaUpdates.assigned_office_name = updates.assignedOfficeName || null;
+        if (updates.officeLatitude !== undefined) supaUpdates.office_latitude = updates.officeLatitude ?? null;
+        if (updates.officeLongitude !== undefined) supaUpdates.office_longitude = updates.officeLongitude ?? null;
+        if (updates.allowedRadiusMeters !== undefined) supaUpdates.allowed_radius_meters = updates.allowedRadiusMeters ?? null;
+        if (updates.officeAddress !== undefined) supaUpdates.office_address = updates.officeAddress || null;
+        if (updates.locationStatus !== undefined) supaUpdates.location_status = updates.locationStatus || 'Active';
+        if (updates.shiftStartTime !== undefined) supaUpdates.shift_start_time = updates.shiftStartTime || null;
+        if (updates.shiftEndTime !== undefined) supaUpdates.shift_end_time = updates.shiftEndTime || null;
+        if (updates.gracePeriodMinutes !== undefined) supaUpdates.grace_period_minutes = updates.gracePeriodMinutes ?? null;
 
         (async () => {
           try {
-            for (let attempt = 0; attempt < 8; attempt++) {
-              const { error: updErr } = await sb
-                .from('users')
-                .update(supaUpdates)
-                .ilike('email', email);
+            const matchEmail = target?.email || email;
+            for (let attempt = 0; attempt < 20; attempt++) {
+              const query = matchEmail
+                ? sb.from('users').update(supaUpdates).ilike('email', matchEmail)
+                : sb.from('users').update(supaUpdates).eq('uid', uid);
+              const { error: updErr } = await query;
               if (!updErr) break;
               const colMatch =
                 updErr.message.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation ["']?users["']? does not exist/i) ||
                 updErr.message.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i);
               if (colMatch && colMatch[1]) {
+                if (hasGeoUpdate && geofenceDedicatedCols.has(colMatch[1])) {
+                  const basePerms =
+                    supaUpdates.permissions ||
+                    mergedTarget?.permissions ||
+                    target?.permissions ||
+                    {};
+                  supaUpdates.permissions = {
+                    ...(typeof basePerms === 'object' && basePerms ? basePerms : {}),
+                    geofence: geoSnapshot,
+                  };
+                }
                 delete supaUpdates[colMatch[1]];
                 continue;
               }
@@ -18421,7 +18538,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (email) {
           const { data: foundByEmail } = await sb
             .from('users')
-            .select('id, email, uid')
+            .select('id, email, uid, permissions')
             .ilike('email', email)
             .limit(1);
           if (foundByEmail && foundByEmail.length > 0) {
@@ -18431,7 +18548,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (!existingSbUser && uid) {
           const { data: foundByUid } = await sb
             .from('users')
-            .select('id, email, uid')
+            .select('id, email, uid, permissions')
             .eq('uid', uid)
             .limit(1);
           if (foundByUid && foundByUid.length > 0) {
@@ -18440,9 +18557,23 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (existingSbUser) {
+          const existingRawPerms =
+            typeof existingSbUser.permissions === 'string'
+              ? (() => {
+                  try {
+                    return JSON.parse(existingSbUser.permissions);
+                  } catch {
+                    return null;
+                  }
+                })()
+              : existingSbUser.permissions;
+          const preservedPermissionsPayload =
+            existingRawPerms && typeof existingRawPerms === 'object' && existingRawPerms.geofence
+              ? { ...permissions, geofence: existingRawPerms.geofence }
+              : permissions;
           // UPDATE existing row
           let updatePayload: any = {
-            permissions: permissions,
+            permissions: preservedPermissionsPayload,
             updated_at: new Date().toISOString(),
           };
 
@@ -20551,7 +20682,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const prevLocations = officeLocations;
-    const prevReps = fieldForceReps;
+    const prevUsers = users;
 
     setOfficeLocations((prev) =>
       prev.some((loc) => loc.id === id)
@@ -20559,12 +20690,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : [mergedOffice, ...prev]
     );
 
-    // Cascade coordinate/radius updates to employees assigned to this office ID
-    setFieldForceReps((prev) =>
-      prev.map((rep) => {
-        if (rep.assignedOfficeId === id) {
-          return {
-            ...rep,
+    // Cascade coordinate/radius updates to User records assigned to this office ID
+    setUsers((prev) =>
+      prev.map((u) => {
+        if (u.assignedOfficeId === id) {
+          const updatedUser: User = {
+            ...u,
             assignedOfficeName: mergedOffice.name,
             officeLatitude: mergedOffice.latitude,
             officeLongitude: mergedOffice.longitude,
@@ -20572,8 +20703,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             officeAddress: mergedOffice.address,
             locationStatus: mergedOffice.status,
           };
+          if (currentUser.id === u.id) {
+            setCurrentUser(updatedUser);
+          }
+          return updatedUser;
         }
-        return rep;
+        return u;
       })
     );
 
@@ -20601,7 +20736,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (error) {
           console.error('Supabase office_locations update failed:', error);
           setOfficeLocations(prevLocations);
-          setFieldForceReps(prevReps);
+          setUsers(prevUsers);
           return {
             success: false,
             error: formatOfficeLocationSupabaseError(error),
@@ -20632,10 +20767,10 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
 
-        // Persist cascaded office coordinate/name/radius updates to assigned employees in Supabase
-        const hasAssignedReps = prevReps.some((rep) => rep.assignedOfficeId === id);
-        if (hasAssignedReps) {
-          sb.from('field_force_reps')
+        // Persist cascaded office coordinate/name/radius updates to assigned users in Supabase
+        const hasAssignedUsers = prevUsers.some((u) => u.assignedOfficeId === id);
+        if (hasAssignedUsers) {
+          sb.from('users')
             .update({
               assigned_office_name: mergedOffice.name,
               office_latitude: mergedOffice.latitude,
@@ -20645,16 +20780,16 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               location_status: mergedOffice.status,
             })
             .eq('assigned_office_id', id)
-            .then(({ error: repErr }) => {
-              if (repErr && repErr.code !== '42703') {
-                console.warn('Notice syncing updated office coordinates to field_force_reps:', repErr.message);
+            .then(({ error: userErr }) => {
+              if (userErr && userErr.code !== '42703') {
+                console.warn('Notice syncing updated office coordinates to users:', userErr.message);
               }
             });
         }
       } catch (err: any) {
         console.error('Exception updating office location in Supabase:', err);
         setOfficeLocations(prevLocations);
-        setFieldForceReps(prevReps);
+        setUsers(prevUsers);
         return {
           success: false,
           error: err?.message || 'Database connection error while updating office location.',
@@ -20733,41 +20868,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resolveEmployeeGeofenceConfig = (employee: FieldForceRep) => {
-    const matchedOffice = employee.assignedOfficeId
-      ? officeLocations.find((o) => o.id === employee.assignedOfficeId)
-      : undefined;
-    const officeLat =
-      typeof employee.officeLatitude === 'number' && isValidCoordinatePair(employee.officeLatitude, employee.officeLongitude)
-        ? employee.officeLatitude
-        : matchedOffice?.latitude ?? DEFAULT_OFFICE_LOCATIONS[0].latitude;
-    const officeLng =
-      typeof employee.officeLongitude === 'number' && isValidCoordinatePair(employee.officeLatitude, employee.officeLongitude)
-        ? employee.officeLongitude
-        : matchedOffice?.longitude ?? DEFAULT_OFFICE_LOCATIONS[0].longitude;
-    const allowedRadiusMeters =
-      Number(employee.allowedRadiusMeters) > 0
-        ? Number(employee.allowedRadiusMeters)
-        : matchedOffice?.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS;
-    const locationStatus: 'Active' | 'Inactive' =
-      employee.locationStatus || matchedOffice?.status || 'Active';
-    return {
-      assignedOfficeId: employee.assignedOfficeId || matchedOffice?.id || DEFAULT_OFFICE_LOCATIONS[0].id,
-      assignedOfficeName:
-        employee.assignedOfficeName ||
-        matchedOffice?.name ||
-        employee.branchWorkplace ||
-        DEFAULT_OFFICE_LOCATIONS[0].name,
-      officeAddress: employee.officeAddress || matchedOffice?.address || DEFAULT_OFFICE_LOCATIONS[0].address,
-      officeLatitude: officeLat,
-      officeLongitude: officeLng,
-      allowedRadiusMeters,
-      locationStatus,
-      shiftStartTime: employee.shiftStartTime || payrollSettings.shiftStartTime || DEFAULT_SHIFT_START_TIME,
-      gracePeriodMinutes:
-        employee.gracePeriodMinutes ?? payrollSettings.lateGracePeriodMinutes ?? DEFAULT_GRACE_PERIOD_MINUTES,
-      standardDailyHours: payrollSettings.standardDailyHours || payrollSettings.standardWorkHoursPerDay || 8,
-      maxGpsAccuracyMeters: payrollSettings.maxGpsAccuracyMeters || DEFAULT_MAX_GPS_ACCURACY_METERS,
-    };
+    const linkedUser = findLinkedUserForEmployee(employee, users);
+    return resolveGeofenceConfigFromUser(
+      linkedUser,
+      officeLocations,
+      payrollSettings,
+      employee.branchWorkplace
+    );
   };
 
   const markAttendance = async (
@@ -21519,14 +21626,16 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      const shiftStartTime =
-        resolvedRep.shiftStartTime || payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME;
-      const gracePeriodMinutes =
-        resolvedRep.gracePeriodMinutes ??
-        payrollSettings?.lateGracePeriodMinutes ??
-        DEFAULT_GRACE_PERIOD_MINUTES;
-      const standardDailyHours =
-        payrollSettings?.standardDailyHours || payrollSettings?.standardWorkHoursPerDay || 8;
+      const linkedUserForQr = findLinkedUserForEmployee(resolvedRep, users);
+      const qrGeoCfg = resolveGeofenceConfigFromUser(
+        linkedUserForQr,
+        officeLocations,
+        payrollSettings,
+        resolvedRep.branchWorkplace
+      );
+      const shiftStartTime = qrGeoCfg.shiftStartTime;
+      const gracePeriodMinutes = qrGeoCfg.gracePeriodMinutes;
+      const standardDailyHours = qrGeoCfg.standardDailyHours;
 
       const existingIn = String(existing?.inTime || existing?.checkInTime || '').trim();
       const existingOut = String(existing?.outTime || existing?.checkOutTime || '').trim();
@@ -21546,7 +21655,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         nextRecord = {
           id: existing?.id || `att-qr-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 5)}`,
-          userId: currentUser?.id,
+          userId: linkedUserForQr?.id || currentUser?.id,
           fieldForceId: resolvedRep.id,
           employeeId: resolvedRep.id,
           employeeCode: resolvedRep.code || undefined,
@@ -21554,8 +21663,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           employeeCategory: resolvedRep.employeeCategory as EmployeeCategory | undefined,
           department: resolvedRep.department || 'Operations',
           designation: resolvedRep.designation,
-          assignedOfficeId: resolvedRep.assignedOfficeId,
-          assignedOfficeName: resolvedRep.assignedOfficeName || resolvedRep.branchWorkplace,
+          assignedOfficeId: qrGeoCfg.assignedOfficeId,
+          assignedOfficeName: qrGeoCfg.assignedOfficeName,
           date: attendanceDate,
           status: shiftCalc.status,
           inTime: scanTime24,

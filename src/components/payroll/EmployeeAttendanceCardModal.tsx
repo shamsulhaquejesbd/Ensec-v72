@@ -25,6 +25,10 @@ import html2canvas from 'html2canvas-pro';
 import { useERP } from '../../context/ERPContext.tsx';
 import { getSupabase } from '../../lib/supabase.ts';
 import { calculateNetWorkingHours, formatTime12Hour, parseTimeToMinutes } from '../../lib/geofence.ts';
+import {
+  findLinkedUserForEmployee,
+  resolveGeofenceConfigFromUser,
+} from '../../lib/fieldForceAuth.ts';
 import type { FieldForceRep } from '../../types/erp.ts';
 import type { AttendanceRecord, AttendanceStatus } from '../../types/payroll.ts';
 import type { OvertimeAttendance, OvertimeRequest } from '../../types/overtime.ts';
@@ -90,6 +94,8 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
   onClose,
 }) => {
   const {
+    users,
+    officeLocations,
     fieldForceReps,
     attendanceRecords,
     overtimeRequests,
@@ -243,11 +249,7 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
           employeeCategory: row.employee_category || contextEmployee.employeeCategory,
           employmentType: row.employment_type || contextEmployee.employmentType,
           employmentStatus: row.employment_status || contextEmployee.employmentStatus,
-          assignedOfficeId: row.assigned_office_id || contextEmployee.assignedOfficeId,
-          assignedOfficeName: row.assigned_office_name || contextEmployee.assignedOfficeName,
           branchWorkplace: row.branch_workplace || contextEmployee.branchWorkplace,
-          shiftStartTime: row.shift_start_time || contextEmployee.shiftStartTime,
-          shiftEndTime: row.shift_end_time || contextEmployee.shiftEndTime,
           joiningDate: row.joining_date || contextEmployee.joiningDate,
         });
       } else {
@@ -817,12 +819,22 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     : rawCompanyAddress;
   const companyAddressLine2 = isDefaultAddress ? 'কদম তলী, ঢাকা' : '';
 
+  const activeEmpGeofence = useMemo(() => {
+    if (!activeEmployee) return null;
+    return resolveGeofenceConfigFromUser(
+      findLinkedUserForEmployee(activeEmployee, users),
+      officeLocations,
+      payrollSettings,
+      activeEmployee.branchWorkplace
+    );
+  }, [activeEmployee, users, officeLocations, payrollSettings]);
+
   const shiftLabel =
-    activeEmployee && (activeEmployee.shiftStartTime || payrollSettings?.shiftStartTime)
+    activeEmpGeofence && (activeEmpGeofence.shiftStartTime || payrollSettings?.shiftStartTime)
       ? `${formatTime12Hour(
-          activeEmployee.shiftStartTime || payrollSettings?.shiftStartTime
+          activeEmpGeofence.shiftStartTime || payrollSettings?.shiftStartTime
         )} - ${formatTime12Hour(
-          activeEmployee.shiftEndTime || payrollSettings?.shiftEndTime || '17:00'
+          activeEmpGeofence.shiftEndTime || payrollSettings?.shiftEndTime || '17:00'
         )}`
       : '';
 

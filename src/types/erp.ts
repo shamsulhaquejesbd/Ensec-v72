@@ -226,6 +226,17 @@ export interface User {
   salesTargetBDT?: number;
   monthlySalesTargetBDT?: number;
   permissions?: UserPermissions;
+  // Assigned Office GPS Location & Shift Geofence Configuration (User-owned)
+  assignedOfficeId?: string;
+  assignedOfficeName?: string;
+  officeLatitude?: number;
+  officeLongitude?: number;
+  allowedRadiusMeters?: number;
+  officeAddress?: string;
+  locationStatus?: 'Active' | 'Inactive';
+  shiftStartTime?: string;
+  shiftEndTime?: string;
+  gracePeriodMinutes?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1275,18 +1286,6 @@ export interface FieldForceRep {
     createdAt: string;
     updatedBy?: string;
   }>;
-  
-  // GPS Geofencing & Assigned Office Location Setup
-  assignedOfficeId?: string;
-  assignedOfficeName?: string;
-  officeLatitude?: number;
-  officeLongitude?: number;
-  allowedRadiusMeters?: number; // Default 200m
-  officeAddress?: string;
-  locationStatus?: 'Active' | 'Inactive';
-  shiftStartTime?: string; // HH:mm default '09:00'
-  shiftEndTime?: string;   // HH:mm default '18:00'
-  gracePeriodMinutes?: number; // default 15
 
   [key: string]: any;
 }

@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { Calendar, ChevronDown, Download, Filter, Printer } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
 import { calculateNetWorkingHours } from '../../lib/geofence.ts';
+import { findLinkedUserForEmployee } from '../../lib/fieldForceAuth.ts';
 
 interface DailyWagesBillFactoryProps {
   searchQuery: string;
@@ -188,6 +189,7 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
   canExport,
 }) => {
   const {
+    users,
     fieldForceReps,
     attendanceRecords,
     salaryStructures,
@@ -384,7 +386,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       .filter((rep) => {
         if (!isEmployeeActive(rep)) return false;
 
-        const office = rep.assignedOfficeName || rep.branchWorkplace || 'Head Office';
+        const linkedUser = findLinkedUserForEmployee(rep, users);
+        const office = linkedUser?.assignedOfficeName || rep.branchWorkplace || 'Head Office';
         const empDept = rep.department || rep.departments?.[0] || 'Operations';
         const empType = rep.employmentType || (rep as any).employment_type || '-';
         const empGender = rep.gender || '-';
@@ -532,6 +535,7 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       amountInWords: numberToWordsSimple(grandTotalAmount),
     };
   }, [
+    users,
     fieldForceReps,
     attendanceRecords,
     salaryStructures,

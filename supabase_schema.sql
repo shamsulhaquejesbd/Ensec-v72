@@ -48,6 +48,18 @@ ALTER TABLE public.users ADD COLUMN IF NOT EXISTS sales_target_bdt NUMERIC(14, 2
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_sales_target_bdt NUMERIC(14, 2) DEFAULT 0.00;
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS avatar TEXT;
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+-- User-owned Assigned Office GPS Location & Shift Geofence columns
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS assigned_office_id TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS assigned_office_name TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS office_latitude NUMERIC(10, 7);
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS office_longitude NUMERIC(10, 7);
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS allowed_radius_meters INT DEFAULT 200;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS office_address TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS location_status TEXT DEFAULT 'Active';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS shift_start_time TEXT DEFAULT '09:00';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS shift_end_time TEXT DEFAULT '18:00';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS grace_period_minutes INT DEFAULT 15;
+CREATE INDEX IF NOT EXISTS idx_users_assigned_office ON public.users(assigned_office_id);
 
 -- ============================================================================
 -- 2. WAREHOUSES TABLE
@@ -3575,17 +3587,8 @@ CREATE TABLE IF NOT EXISTS public.office_locations (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Extend existing field_force_reps (central employees) with office assignment & shift rules
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS assigned_office_id TEXT;
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS assigned_office_name TEXT;
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS office_latitude NUMERIC(10, 7);
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS office_longitude NUMERIC(10, 7);
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS allowed_radius_meters INT DEFAULT 200;
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS office_address TEXT;
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS location_status TEXT DEFAULT 'Active';
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS shift_start_time TEXT DEFAULT '09:00';
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS shift_end_time TEXT DEFAULT '18:00';
-ALTER TABLE public.field_force_reps ADD COLUMN IF NOT EXISTS grace_period_minutes INT DEFAULT 15;
+-- Note: Assigned Office GPS Location & Shift Geofence columns live on public.users (user-based ownership).
+-- See supabase/migrations/20261121_move_geofence_to_users.sql for schema and data migration.
 
 -- Extend existing employee_attendances table with full GPS geofencing audit fields
 ALTER TABLE public.employee_attendances ADD COLUMN IF NOT EXISTS department TEXT;

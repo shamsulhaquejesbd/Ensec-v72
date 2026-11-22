@@ -97,6 +97,10 @@ import {
   EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
 } from '../../types/payroll.ts';
 import { FieldForceRep } from '../../types/erp.ts';
+import {
+  findLinkedUserForEmployee,
+  resolveGeofenceConfigFromUser,
+} from '../../lib/fieldForceAuth.ts';
 import { EmployeeAttendanceCardModal } from './EmployeeAttendanceCardModal.tsx';
 import { DailyWagesBillFactory } from './DailyWagesBillFactory.tsx';
 import { Time12HourInput } from '../common/Time12HourInput.tsx';
@@ -125,6 +129,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     currentUser,
     currentEmployeeProfile,
     systemSettings,
+    users,
     fieldForceReps,
     departments,
     officeLocations,
@@ -735,17 +740,28 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     return ['All', ...Array.from(set)];
   }, [fieldForceReps]);
 
+  const getEmployeeGeoConfig = (emp: FieldForceRep) =>
+    resolveGeofenceConfigFromUser(
+      findLinkedUserForEmployee(emp, users),
+      officeLocations,
+      payrollSettings,
+      emp.branchWorkplace
+    );
+
   const officeFilterOptions = useMemo(() => {
     const set = new Set<string>();
     officeLocations.forEach((o) => {
       if (o.name) set.add(o.name);
     });
+    users.forEach((u) => {
+      if (u.assignedOfficeName) set.add(u.assignedOfficeName);
+    });
     fieldForceReps.forEach((r) => {
-      const officeName = r.assignedOfficeName || r.branchWorkplace;
+      const officeName = getEmployeeGeoConfig(r).assignedOfficeName;
       if (officeName) set.add(officeName);
     });
     return ['All', ...Array.from(set)];
-  }, [officeLocations, fieldForceReps]);
+  }, [officeLocations, users, fieldForceReps, payrollSettings]);
 
   const employeeLookupById = useMemo(() => {
     const map = new Map<string, FieldForceRep>();
@@ -781,7 +797,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       employeeLookupById.get(rec.employeeId || rec.fieldForceId || '') ||
       employeeLookupById.get(rec.employeeCode || '');
     const officeName =
-      rec.assignedOfficeName || emp?.assignedOfficeName || emp?.branchWorkplace || 'Head Office';
+      rec.assignedOfficeName ||
+      (emp ? getEmployeeGeoConfig(emp).assignedOfficeName : 'Head Office');
     const checkIn = rec.checkInTime || rec.inTime || '';
     const checkOut = rec.checkOutTime || rec.outTime || '';
     const workHrs =
@@ -871,7 +888,9 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
           employeeLookupById.get(att.employeeCode || '');
         const dept = att.department || emp?.department || 'Operations';
         const actionType = emp?.actionType || '';
-        const office = att.assignedOfficeName || emp?.assignedOfficeName || emp?.branchWorkplace || 'Head Office';
+        const office =
+          att.assignedOfficeName ||
+          (emp ? getEmployeeGeoConfig(emp).assignedOfficeName : 'Head Office');
         if (q) {
           const hay = `${att.employeeCode || ''} ${att.employeeName} ${dept} ${office} ${att.rejectionReason}`.toLowerCase();
           if (!hay.includes(q)) return false;
@@ -891,13 +910,16 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     attActionTypeFilter,
     attOfficeFilter,
     employeeLookupById,
+    users,
+    officeLocations,
+    payrollSettings,
   ]);
 
   const employeePeriodSummaries = useMemo(() => {
     const q = attSearchQuery.trim().toLowerCase();
     return fieldForceReps
       .filter((emp) => {
-        const office = emp.assignedOfficeName || emp.branchWorkplace || 'Head Office';
+        const office = getEmployeeGeoConfig(emp).assignedOfficeName;
         if (q) {
           const hay = `${emp.code} ${emp.name} ${emp.department || ''} ${emp.employeeCategory || ''} ${emp.actionType || ''} ${office}`.toLowerCase();
           if (!hay.includes(q)) return false;
@@ -931,7 +953,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
         const totalLateMinutes = empRecs.reduce((sum, r) => sum + (r.lateDurationMinutes ?? r.lateMinutes ?? 0), 0);
         return {
           emp,
-          assignedOffice: emp.assignedOfficeName || emp.branchWorkplace || 'Head Office',
+          assignedOffice: getEmployeeGeoConfig(emp).assignedOfficeName,
           totalDays: empRecs.length,
           presentDays,
           lateDays,
@@ -945,6 +967,9 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
       });
   }, [
     fieldForceReps,
+    users,
+    officeLocations,
+    payrollSettings,
     attendanceRecords,
     rejectedAttendanceAttempts,
     attDateFrom,
@@ -2531,22 +2556,14 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                         setIsBulkSavingAttendance(true);
                         setAttendanceFeedback(null);
                         const bulk = fieldForceReps.map((emp) => {
-                          const defaultIn =
-                            emp.shiftStartTime ||
-                            payrollSettings?.shiftStartTime ||
-                            DEFAULT_SHIFT_START_TIME;
-                          const defaultOut =
-                            emp.shiftEndTime ||
-                            payrollSettings?.shiftEndTime ||
-                            DEFAULT_SHIFT_END_TIME;
+                          const empGeo = getEmployeeGeoConfig(emp);
+                          const defaultIn = empGeo.shiftStartTime || DEFAULT_SHIFT_START_TIME;
+                          const defaultOut = empGeo.shiftEndTime || DEFAULT_SHIFT_END_TIME;
                           const shiftCalc = calculateShiftAttendanceStatus({
                             checkInTime: defaultIn,
                             checkOutTime: defaultOut,
                             shiftStartTime: defaultIn,
-                            gracePeriodMinutes:
-                              emp.gracePeriodMinutes ??
-                              payrollSettings?.lateGracePeriodMinutes ??
-                              DEFAULT_GRACE_PERIOD_MINUTES,
+                            gracePeriodMinutes: empGeo.gracePeriodMinutes,
                             standardDailyHours:
                               payrollSettings?.standardDailyHours ||
                               payrollSettings?.standardWorkHoursPerDay ||
@@ -2558,8 +2575,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                             employeeName: emp.name,
                             department: emp.department,
                             designation: emp.designation,
-                            assignedOfficeId: emp.assignedOfficeId,
-                            assignedOfficeName: emp.assignedOfficeName || emp.branchWorkplace,
+                            assignedOfficeId: empGeo.assignedOfficeId,
+                            assignedOfficeName: empGeo.assignedOfficeName,
                             date: selectedDateForAtt,
                             status: 'Present' as AttendanceStatus,
                             inTime: defaultIn,
@@ -2724,7 +2741,7 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {fieldForceReps
                         .filter((emp) => {
-                          const office = emp.assignedOfficeName || emp.branchWorkplace || 'Head Office';
+                          const office = getEmployeeGeoConfig(emp).assignedOfficeName;
                           if (attSearchQuery.trim()) {
                             const q = attSearchQuery.trim().toLowerCase();
                             const hay = `${emp.code} ${emp.name} ${emp.department || ''} ${emp.employeeCategory || ''} ${emp.actionType || ''} ${office}`.toLowerCase();
@@ -2769,23 +2786,15 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                           Boolean(draft) && (draft.inTime !== savedIn || draft.outTime !== savedOut);
                         const isSavingRow = savingAttendanceRowId === emp.id;
 
+                        const empGeo = getEmployeeGeoConfig(emp);
                         const saveRowAttendance = async (
                           targetStatus?: AttendanceStatus,
                           overrideTimes?: { inTime?: string; outTime?: string }
                         ) => {
                           if (!canCreatePayroll || isSavingRow) return;
-                          const shiftStart =
-                            emp.shiftStartTime ||
-                            payrollSettings?.shiftStartTime ||
-                            DEFAULT_SHIFT_START_TIME;
-                          const shiftEnd =
-                            emp.shiftEndTime ||
-                            payrollSettings?.shiftEndTime ||
-                            DEFAULT_SHIFT_END_TIME;
-                          const graceMins =
-                            emp.gracePeriodMinutes ??
-                            payrollSettings?.lateGracePeriodMinutes ??
-                            DEFAULT_GRACE_PERIOD_MINUTES;
+                          const shiftStart = empGeo.shiftStartTime || DEFAULT_SHIFT_START_TIME;
+                          const shiftEnd = empGeo.shiftEndTime || DEFAULT_SHIFT_END_TIME;
+                          const graceMins = empGeo.gracePeriodMinutes;
                           const stdHours =
                             payrollSettings?.standardDailyHours ||
                             payrollSettings?.standardWorkHoursPerDay ||
@@ -2834,8 +2843,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                             employeeName: emp.name,
                             department: emp.department,
                             designation: emp.designation,
-                            assignedOfficeId: emp.assignedOfficeId,
-                            assignedOfficeName: emp.assignedOfficeName || emp.branchWorkplace,
+                            assignedOfficeId: empGeo.assignedOfficeId,
+                            assignedOfficeName: empGeo.assignedOfficeName,
                             date: selectedDateForAtt,
                             status: nextStatus,
                             inTime: finalIn || undefined,
@@ -3004,14 +3013,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                                       type="button"
                                       disabled={isSavingRow}
                                       onClick={() => {
-                                        const shiftStart =
-                                          emp.shiftStartTime ||
-                                          payrollSettings?.shiftStartTime ||
-                                          DEFAULT_SHIFT_START_TIME;
-                                        const shiftEnd =
-                                          emp.shiftEndTime ||
-                                          payrollSettings?.shiftEndTime ||
-                                          DEFAULT_SHIFT_END_TIME;
+                                        const shiftStart = empGeo.shiftStartTime || DEFAULT_SHIFT_START_TIME;
+                                        const shiftEnd = empGeo.shiftEndTime || DEFAULT_SHIFT_END_TIME;
                                         const targetIn =
                                           st === 'Absent'
                                             ? ''
@@ -5962,8 +5965,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {historyEmployee.department || 'Operations'} • {historyEmployee.designation || 'Executive'} • Office:{' '}
-                  {historyEmployee.assignedOfficeName || historyEmployee.branchWorkplace || 'Head Office'} (
-                  {historyEmployee.allowedRadiusMeters ?? 200}m radius)
+                  {getEmployeeGeoConfig(historyEmployee).assignedOfficeName} (
+                  {getEmployeeGeoConfig(historyEmployee).allowedRadiusMeters}m radius)
                 </p>
               </div>
               <button

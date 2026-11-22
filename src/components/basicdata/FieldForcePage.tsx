@@ -51,11 +51,12 @@ import { EmployeeQrBulkModal, EmployeeQrSingleModal } from './EmployeeQrModal.ts
 import { EmployeeCategory, EmploymentType, EmploymentStatus, OfficeLocation } from '../../types/payroll.ts';
 import {
   DEFAULT_ALLOWED_RADIUS_METERS,
-  DEFAULT_GRACE_PERIOD_MINUTES,
-  DEFAULT_SHIFT_END_TIME,
-  DEFAULT_SHIFT_START_TIME,
   isValidCoordinatePair,
 } from '../../lib/geofence.ts';
+import {
+  findLinkedUserForEmployee,
+  resolveGeofenceConfigFromUser,
+} from '../../lib/fieldForceAuth.ts';
 
 // Helper to filter out test/mock legacy employee records (e.g., ff-1 to ff-9 or dummy test data)
 const isTestOrMockRep = (rep: any): boolean => {
@@ -203,8 +204,8 @@ export const FieldForcePage: React.FC = () => {
   const [editingRep, setEditingRep] = useState<FieldForceRep | null>(null);
   const [viewingRep, setViewingRep] = useState<FieldForceRep | null>(null);
   const [repToDelete, setRepToDelete] = useState<FieldForceRep | null>(null);
-  const [addModalTab, setAddModalTab] = useState<'all' | 'basic' | 'target' | 'overtime' | 'permissions' | 'approver' | 'geofence'>('all');
-  const [editModalTab, setEditModalTab] = useState<'all' | 'basic' | 'target' | 'overtime' | 'permissions' | 'approver' | 'geofence'>('all');
+  const [addModalTab, setAddModalTab] = useState<'all' | 'basic' | 'target' | 'overtime' | 'permissions' | 'approver'>('all');
+  const [editModalTab, setEditModalTab] = useState<'all' | 'basic' | 'target' | 'overtime' | 'permissions' | 'approver'>('all');
 
   // Office GPS Locations Setup Modal State
   const [showOfficeSetupModal, setShowOfficeSetupModal] = useState(false);
@@ -310,19 +311,6 @@ export const FieldForcePage: React.FC = () => {
   const [formRoutingNumber, setFormRoutingNumber] = useState('');
   const [formMobileBankingProvider, setFormMobileBankingProvider] = useState('bKash');
   const [formMobileBankingNumber, setFormMobileBankingNumber] = useState('');
-
-  // Office GPS Geofencing & Shift Assignment State
-  const [formAssignedOfficeId, setFormAssignedOfficeId] = useState<string>('');
-  const [formAssignedOfficeName, setFormAssignedOfficeName] = useState<string>('');
-  const [formOfficeLatitude, setFormOfficeLatitude] = useState<string>('');
-  const [formOfficeLongitude, setFormOfficeLongitude] = useState<string>('');
-  const [formAllowedRadiusMeters, setFormAllowedRadiusMeters] = useState<number | ''>('');
-  const [formOfficeAddress, setFormOfficeAddress] = useState<string>('');
-  const [formLocationStatus, setFormLocationStatus] = useState<'Active' | 'Inactive' | ''>('');
-  const [formShiftStartTime, setFormShiftStartTime] = useState<string>('');
-  const [formShiftEndTime, setFormShiftEndTime] = useState<string>('');
-  const [formGracePeriodMinutes, setFormGracePeriodMinutes] = useState<number | ''>('');
-  const [gpsCaptureStatus, setGpsCaptureStatus] = useState<string>('');
 
   // Dynamic merged market hierarchy options (from stored list + orgHierarchy tree)
   const allMarketHierarchyOptions = useMemo(() => {
@@ -487,18 +475,7 @@ export const FieldForcePage: React.FC = () => {
     setFormOvertimePolicyStatus('Active');
     setFormOvertimePolicyNotes('');
     setFormTadaApproverId('');
-    setFormAssignedOfficeId('');
-    setFormAssignedOfficeName('');
-    setFormOfficeLatitude('');
-    setFormOfficeLongitude('');
-    setFormAllowedRadiusMeters('');
-    setFormOfficeAddress('');
-    setFormLocationStatus('');
-    setFormShiftStartTime('');
-    setFormShiftEndTime('');
-    setFormGracePeriodMinutes('');
     setFormLinkedUserId('');
-    setGpsCaptureStatus('');
     setDepartmentError('');
   };
 
@@ -598,39 +575,7 @@ export const FieldForcePage: React.FC = () => {
     setFormRoutingNumber(rep.routingNumber || '');
     setFormMobileBankingProvider(rep.mobileBankingProvider || 'bKash');
     setFormMobileBankingNumber(rep.mobileBankingNumber || '');
-
-    // GPS Geofencing & Shift fields
-    const matchedOffice = rep.assignedOfficeId
-      ? officeLocations.find((o) => o.id === rep.assignedOfficeId)
-      : undefined;
-    setFormAssignedOfficeId(rep.assignedOfficeId || '');
-    setFormAssignedOfficeName(rep.assignedOfficeName || matchedOffice?.name || rep.branchWorkplace || '');
-    setFormOfficeLatitude(
-      rep.officeLatitude !== undefined && rep.officeLatitude !== null
-        ? String(rep.officeLatitude)
-        : (matchedOffice ? String(matchedOffice.latitude) : '')
-    );
-    setFormOfficeLongitude(
-      rep.officeLongitude !== undefined && rep.officeLongitude !== null
-        ? String(rep.officeLongitude)
-        : (matchedOffice ? String(matchedOffice.longitude) : '')
-    );
-    setFormAllowedRadiusMeters(
-      rep.allowedRadiusMeters !== undefined && rep.allowedRadiusMeters !== null
-        ? Number(rep.allowedRadiusMeters)
-        : (matchedOffice?.allowedRadiusMeters ?? '')
-    );
-    setFormOfficeAddress(rep.officeAddress || matchedOffice?.address || '');
-    setFormLocationStatus((rep.locationStatus as 'Active' | 'Inactive') || matchedOffice?.status || '');
-    setFormShiftStartTime(rep.shiftStartTime || '');
-    setFormShiftEndTime(rep.shiftEndTime || '');
-    setFormGracePeriodMinutes(
-      rep.gracePeriodMinutes !== undefined && rep.gracePeriodMinutes !== null
-        ? rep.gracePeriodMinutes
-        : ''
-    );
     setFormLinkedUserId(rep.userId || '');
-    setGpsCaptureStatus('');
   };
 
   const handleClearLocalStorage = () => {
@@ -755,18 +700,6 @@ export const FieldForcePage: React.FC = () => {
       mobileBankingNumber: formMobileBankingNumber.trim() || undefined,
       status: formStatus,
       isActive: formStatus === 'Active',
-      // Office GPS Geofencing & Shift Setup
-      assignedOfficeId: formAssignedOfficeId || undefined,
-      assignedOfficeName: formAssignedOfficeName.trim() || undefined,
-      branchWorkplace: formAssignedOfficeName.trim() || undefined,
-      officeLatitude: formOfficeLatitude !== '' && !isNaN(Number(formOfficeLatitude)) ? Number(formOfficeLatitude) : undefined,
-      officeLongitude: formOfficeLongitude !== '' && !isNaN(Number(formOfficeLongitude)) ? Number(formOfficeLongitude) : undefined,
-      allowedRadiusMeters: formAllowedRadiusMeters !== '' && Number(formAllowedRadiusMeters) > 0 ? Number(formAllowedRadiusMeters) : undefined,
-      officeAddress: formOfficeAddress.trim() || undefined,
-      locationStatus: (formLocationStatus || undefined) as 'Active' | 'Inactive' | undefined,
-      shiftStartTime: formShiftStartTime || undefined,
-      shiftEndTime: formShiftEndTime || undefined,
-      gracePeriodMinutes: formGracePeriodMinutes !== '' && Number(formGracePeriodMinutes) >= 0 ? Number(formGracePeriodMinutes) : undefined,
       // Individual Overtime Policy Configuration
       isOvertimeEligible: formIsOvertimeEligible,
       overtimeCalculationBasis: formOvertimeCalculationBasis,
@@ -783,8 +716,8 @@ export const FieldForcePage: React.FC = () => {
       todayVisitsCount: 0,
       productiveVisitsCount: 0,
       currentLocation: {
-        latitude: Number(formOfficeLatitude) || 23.8103,
-        longitude: Number(formOfficeLongitude) || 90.4125,
+        latitude: officeLocations[0]?.latitude || 23.8103,
+        longitude: officeLocations[0]?.longitude || 90.4125,
         address: formMarketHierarchy || resolvedTerritory ? `${formMarketHierarchy || resolvedTerritory}, Bangladesh` : 'Bangladesh',
         lastUpdated: 'New Registration',
         speedKmH: 0,
@@ -920,18 +853,6 @@ export const FieldForcePage: React.FC = () => {
       routingNumber: formRoutingNumber.trim() || undefined,
       mobileBankingProvider: formMobileBankingProvider || undefined,
       mobileBankingNumber: formMobileBankingNumber.trim() || undefined,
-      // Office GPS Geofencing & Shift Setup
-      assignedOfficeId: formAssignedOfficeId || '',
-      assignedOfficeName: formAssignedOfficeName.trim() || '',
-      branchWorkplace: formAssignedOfficeName.trim() || editingRep.branchWorkplace,
-      officeLatitude: formOfficeLatitude !== '' && !isNaN(Number(formOfficeLatitude)) ? Number(formOfficeLatitude) : undefined,
-      officeLongitude: formOfficeLongitude !== '' && !isNaN(Number(formOfficeLongitude)) ? Number(formOfficeLongitude) : undefined,
-      allowedRadiusMeters: formAllowedRadiusMeters !== '' && Number(formAllowedRadiusMeters) > 0 ? Number(formAllowedRadiusMeters) : undefined,
-      officeAddress: formOfficeAddress.trim() || '',
-      locationStatus: (formLocationStatus || undefined) as 'Active' | 'Inactive' | undefined,
-      shiftStartTime: formShiftStartTime || '',
-      shiftEndTime: formShiftEndTime || '',
-      gracePeriodMinutes: formGracePeriodMinutes !== '' && Number(formGracePeriodMinutes) >= 0 ? Number(formGracePeriodMinutes) : undefined,
     });
 
     addAuditLog(
@@ -1511,15 +1432,26 @@ export const FieldForcePage: React.FC = () => {
                           <Tag className="w-3 h-3 text-blue-600 dark:text-blue-400" />
                           <span>{hierarchyDisplay}</span>
                         </div>
-                        <div className="mt-1 flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400">
-                          <Navigation className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                          <span className="truncate max-w-[170px] font-medium">
-                            {rep.assignedOfficeName || rep.branchWorkplace || 'Head Office (Gulshan HQ)'}
-                          </span>
-                          <span className="font-mono text-emerald-700 dark:text-emerald-300 font-bold">
-                            • {rep.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS}m
-                          </span>
-                        </div>
+                        {(() => {
+                          const linkedUser = findLinkedUserForEmployee(rep, users);
+                          const geoCfg = resolveGeofenceConfigFromUser(
+                            linkedUser,
+                            officeLocations,
+                            undefined,
+                            rep.branchWorkplace
+                          );
+                          return (
+                            <div className="mt-1 flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400">
+                              <Navigation className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                              <span className="truncate max-w-[170px] font-medium">
+                                {geoCfg.assignedOfficeName}
+                              </span>
+                              <span className="font-mono text-emerald-700 dark:text-emerald-300 font-bold">
+                                • {geoCfg.allowedRadiusMeters}m
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       {/* Mapped Distributor */}
@@ -1956,7 +1888,6 @@ export const FieldForcePage: React.FC = () => {
                 { id: 'overtime', label: '3. Overtime Policy & Configuration', icon: Clock },
                 { id: 'permissions', label: '4. Permissions & Tags', icon: ShieldCheck },
                 { id: 'approver', label: '5. TADA Approver', icon: UserCheck },
-                { id: 'geofence', label: '6. Office GPS & Shift', icon: Navigation },
               ].map((tab) => {
                 const Icon = tab.icon;
                 const isActive = addModalTab === tab.id;
@@ -3108,214 +3039,6 @@ export const FieldForcePage: React.FC = () => {
                 </div>
               )}
 
-              {/* SECTION 6: OFFICE GPS LOCATION & GEOFENCE ATTENDANCE CONFIGURATION */}
-              {(addModalTab === 'all' || addModalTab === 'geofence') && (
-                <div className="p-4 rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/30 dark:bg-emerald-950/20 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-100 dark:border-emerald-900/40 pb-3">
-                    <div>
-                      <h3 className="font-bold text-xs uppercase tracking-wider text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
-                        <Navigation className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                        <span>6. Assigned Office GPS Location & Shift Geofence</span>
-                      </h3>
-                      
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!navigator.geolocation) {
-                          setGpsCaptureStatus('Browser Geolocation is not supported on this device.');
-                          return;
-                        }
-                        setGpsCaptureStatus('Detecting current GPS coordinates...');
-                        navigator.geolocation.getCurrentPosition(
-                          (pos) => {
-                            setFormOfficeLatitude(pos.coords.latitude.toFixed(6));
-                            setFormOfficeLongitude(pos.coords.longitude.toFixed(6));
-                            setGpsCaptureStatus(`Captured current coordinates (±${Math.round(pos.coords.accuracy)}m accuracy).`);
-                          },
-                          (err) => setGpsCaptureStatus(`GPS capture failed: ${err.message}`),
-                          { enableHighAccuracy: true, timeout: 10000 }
-                        );
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold inline-flex items-center gap-1.5 self-start"
-                    >
-                      <Crosshair className="w-3.5 h-3.5" />
-                      <span>Use My Current GPS</span>
-                    </button>
-                  </div>
-
-                  {gpsCaptureStatus && (
-                    <div className="text-[11px] font-medium text-emerald-700 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-950/60 px-3 py-1.5 rounded-lg">
-                      {gpsCaptureStatus}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Assigned Office / Headquarters *
-                      </label>
-                      <select
-                        value={formAssignedOfficeId}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setFormAssignedOfficeId(val);
-                          const matched = officeLocations.find((o) => o.id === val);
-                          if (matched) {
-                            setFormAssignedOfficeName(matched.name);
-                            setFormOfficeLatitude(String(matched.latitude));
-                            setFormOfficeLongitude(String(matched.longitude));
-                            setFormAllowedRadiusMeters(matched.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS);
-                            setFormOfficeAddress(matched.address || '');
-                            setFormLocationStatus(matched.status || 'Active');
-                          } else if (val === '') {
-                            setFormAssignedOfficeName('');
-                            setFormOfficeLatitude('');
-                            setFormOfficeLongitude('');
-                            setFormAllowedRadiusMeters('');
-                            setFormOfficeAddress('');
-                            setFormLocationStatus('');
-                          }
-                        }}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
-                      >
-                        <option value="">-- Select Assigned Office / HQ --</option>
-                        {officeLocations.map((loc) => (
-                          <option key={loc.id} value={loc.id}>
-                            {loc.name} ({loc.allowedRadiusMeters}m) {loc.status === 'Inactive' ? '[Inactive]' : ''}
-                          </option>
-                        ))}
-                        <option value="custom">-- Custom Office Coordinates --</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Assigned Office Display Name *
-                      </label>
-                      <input
-                        type="text"
-                        value={formAssignedOfficeName}
-                        onChange={(e) => setFormAssignedOfficeName(e.target.value)}
-                        placeholder="e.g. Head Office (Gulshan HQ)"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Location Status *
-                      </label>
-                      <select
-                        value={formLocationStatus}
-                        onChange={(e) => setFormLocationStatus(e.target.value as 'Active' | 'Inactive' | '')}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
-                      >
-                        <option value="">-- Select Location Status --</option>
-                        <option value="Active">Active (Geofence Enforced)</option>
-                        <option value="Inactive">Inactive (Blocked)</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Latitude *
-                      </label>
-                      <input
-                        type="number"
-                        step="any"
-                        value={formOfficeLatitude}
-                        onChange={(e) => setFormOfficeLatitude(e.target.value)}
-                        placeholder="23.8103"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Longitude *
-                      </label>
-                      <input
-                        type="number"
-                        step="any"
-                        value={formOfficeLongitude}
-                        onChange={(e) => setFormOfficeLongitude(e.target.value)}
-                        placeholder="90.4125"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Allowed Attendance Radius (Meters) *
-                      </label>
-                      <input
-                        type="number"
-                        min={10}
-                        max={5000}
-                        value={formAllowedRadiusMeters}
-                        onChange={(e) => setFormAllowedRadiusMeters(e.target.value === '' ? '' : Number(e.target.value))}
-                        placeholder="200"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono font-bold tabular-nums"
-                      />
-                      <span className="text-[10px] text-slate-400">Default: 200 Meters</span>
-                    </div>
-
-                    <div className="sm:col-span-2 lg:col-span-3">
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Address
-                      </label>
-                      <input
-                        type="text"
-                        value={formOfficeAddress}
-                        onChange={(e) => setFormOfficeAddress(e.target.value)}
-                        placeholder="Full office address for attendance audit logs"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Shift Start Time
-                      </label>
-                      <input
-                        type="time"
-                        value={formShiftStartTime}
-                        onChange={(e) => setFormShiftStartTime(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Shift End Time
-                      </label>
-                      <input
-                        type="time"
-                        value={formShiftEndTime}
-                        onChange={(e) => setFormShiftEndTime(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Late Grace Period (Minutes)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={120}
-                        value={formGracePeriodMinutes}
-                        onChange={(e) => setFormGracePeriodMinutes(e.target.value === '' ? '' : Math.max(0, Number(e.target.value)))}
-                        placeholder="15"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {/* Bottom Actions */}
               <div className="flex items-center justify-between pt-4 border-t border-slate-200 dark:border-slate-800">
                 <span className="text-[11px] text-slate-400">
@@ -3385,7 +3108,6 @@ export const FieldForcePage: React.FC = () => {
                 { id: 'overtime', label: '3. Overtime Policy & Configuration', icon: Clock },
                 { id: 'permissions', label: '4. Permissions & Tags', icon: ShieldCheck },
                 { id: 'approver', label: '5. TADA Approver', icon: UserCheck },
-                { id: 'geofence', label: '6. Office GPS & Shift', icon: Navigation },
               ].map((tab) => {
                 const Icon = tab.icon;
                 const isActive = editModalTab === tab.id;
@@ -4576,216 +4298,6 @@ export const FieldForcePage: React.FC = () => {
                         </option>
                       ))}
                     </select>
-                  </div>
-                </div>
-              )}
-
-              {/* SECTION 6: OFFICE GPS LOCATION & GEOFENCE ATTENDANCE CONFIGURATION */}
-              {(editModalTab === 'all' || editModalTab === 'geofence') && (
-                <div className="p-4 rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/30 dark:bg-emerald-950/20 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-100 dark:border-emerald-900/40 pb-3">
-                    <div>
-                      <h3 className="font-bold text-xs uppercase tracking-wider text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
-                        <Navigation className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                        <span>6. Assigned Office GPS Location & Shift Geofence</span>
-                      </h3>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                        Employee: <strong className="text-slate-800 dark:text-slate-200">{formName || editingRep.name}</strong> ({formCode || editingRep.code}) — Attendance is validated against these coordinates.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!navigator.geolocation) {
-                          setGpsCaptureStatus('Browser Geolocation is not supported on this device.');
-                          return;
-                        }
-                        setGpsCaptureStatus('Detecting current GPS coordinates...');
-                        navigator.geolocation.getCurrentPosition(
-                          (pos) => {
-                            setFormOfficeLatitude(pos.coords.latitude.toFixed(6));
-                            setFormOfficeLongitude(pos.coords.longitude.toFixed(6));
-                            setGpsCaptureStatus(`Captured current coordinates (±${Math.round(pos.coords.accuracy)}m accuracy).`);
-                          },
-                          (err) => setGpsCaptureStatus(`GPS capture failed: ${err.message}`),
-                          { enableHighAccuracy: true, timeout: 10000 }
-                        );
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold inline-flex items-center gap-1.5 self-start"
-                    >
-                      <Crosshair className="w-3.5 h-3.5" />
-                      <span>Use My Current GPS</span>
-                    </button>
-                  </div>
-
-                  {gpsCaptureStatus && (
-                    <div className="text-[11px] font-medium text-emerald-700 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-950/60 px-3 py-1.5 rounded-lg">
-                      {gpsCaptureStatus}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Assigned Office / Headquarters *
-                      </label>
-                      <select
-                        value={formAssignedOfficeId}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setFormAssignedOfficeId(val);
-                          const matched = officeLocations.find((o) => o.id === val);
-                          if (matched) {
-                            setFormAssignedOfficeName(matched.name);
-                            setFormOfficeLatitude(String(matched.latitude));
-                            setFormOfficeLongitude(String(matched.longitude));
-                            setFormAllowedRadiusMeters(matched.allowedRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS);
-                            setFormOfficeAddress(matched.address || '');
-                            setFormLocationStatus(matched.status || 'Active');
-                          } else if (val === '') {
-                            setFormAssignedOfficeName('');
-                            setFormOfficeLatitude('');
-                            setFormOfficeLongitude('');
-                            setFormAllowedRadiusMeters('');
-                            setFormOfficeAddress('');
-                            setFormLocationStatus('');
-                          }
-                        }}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
-                      >
-                        <option value="">-- Select Assigned Office / HQ --</option>
-                        {officeLocations.map((loc) => (
-                          <option key={loc.id} value={loc.id}>
-                            {loc.name} ({loc.allowedRadiusMeters}m) {loc.status === 'Inactive' ? '[Inactive]' : ''}
-                          </option>
-                        ))}
-                        <option value="custom">-- Custom Office Coordinates --</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Assigned Office Display Name *
-                      </label>
-                      <input
-                        type="text"
-                        value={formAssignedOfficeName}
-                        onChange={(e) => setFormAssignedOfficeName(e.target.value)}
-                        placeholder="e.g. Head Office (Gulshan HQ)"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Location Status *
-                      </label>
-                      <select
-                        value={formLocationStatus}
-                        onChange={(e) => setFormLocationStatus(e.target.value as 'Active' | 'Inactive' | '')}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
-                      >
-                        <option value="">-- Select Location Status --</option>
-                        <option value="Active">Active (Geofence Enforced)</option>
-                        <option value="Inactive">Inactive (Blocked)</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Latitude *
-                      </label>
-                      <input
-                        type="number"
-                        step="any"
-                        value={formOfficeLatitude}
-                        onChange={(e) => setFormOfficeLatitude(e.target.value)}
-                        placeholder="23.8103"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Longitude *
-                      </label>
-                      <input
-                        type="number"
-                        step="any"
-                        value={formOfficeLongitude}
-                        onChange={(e) => setFormOfficeLongitude(e.target.value)}
-                        placeholder="90.4125"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Allowed Attendance Radius (Meters) *
-                      </label>
-                      <input
-                        type="number"
-                        min={10}
-                        max={5000}
-                        value={formAllowedRadiusMeters}
-                        onChange={(e) => setFormAllowedRadiusMeters(e.target.value === '' ? '' : Number(e.target.value))}
-                        placeholder="200"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono font-bold tabular-nums"
-                      />
-                      <span className="text-[10px] text-slate-400">Default: 200 Meters</span>
-                    </div>
-
-                    <div className="sm:col-span-2 lg:col-span-3">
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Office Address
-                      </label>
-                      <input
-                        type="text"
-                        value={formOfficeAddress}
-                        onChange={(e) => setFormOfficeAddress(e.target.value)}
-                        placeholder="Full office address for attendance audit logs"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Shift Start Time
-                      </label>
-                      <input
-                        type="time"
-                        value={formShiftStartTime}
-                        onChange={(e) => setFormShiftStartTime(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Shift End Time
-                      </label>
-                      <input
-                        type="time"
-                        value={formShiftEndTime}
-                        onChange={(e) => setFormShiftEndTime(e.target.value)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Late Grace Period (Minutes)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={120}
-                        value={formGracePeriodMinutes}
-                        onChange={(e) => setFormGracePeriodMinutes(e.target.value === '' ? '' : Math.max(0, Number(e.target.value)))}
-                        placeholder="15"
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
                   </div>
                 </div>
               )}
