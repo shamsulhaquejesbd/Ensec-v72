@@ -3640,11 +3640,11 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       {/* MODAL: SELECT CUSTOMER / OUTLET PICKER                    */}
       {/* ========================================================= */}
       {showCustomerModal && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-xs p-0 sm:p-4 animate-in fade-in">
-          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-white dark:bg-[#1a1c22] border border-slate-200 dark:border-white/10 p-4 space-y-3.5 shadow-2xl text-slate-900 dark:text-white max-h-[85vh] flex flex-col transition-colors">
+        <div className="fixed inset-0 z-50 flex justify-center bg-slate-100/90 dark:bg-[#0b0c0e]/90 backdrop-blur-xs p-0 animate-in fade-in">
+          <div className="w-full max-w-md h-dvh min-h-screen bg-slate-50 dark:bg-[#16181d] sm:border-x sm:border-slate-200 dark:sm:border-white/5 p-4 space-y-3.5 shadow-2xl text-slate-900 dark:text-white flex flex-col transition-colors">
             
             {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-white/10 pb-3">
+            <div className="shrink-0 flex items-center justify-between border-b border-slate-200 dark:border-white/10 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-9 h-9 rounded-xl bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 flex items-center justify-center shadow-xs">
                   <Store className="w-5 h-5" />
@@ -3665,14 +3665,14 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             </div>
 
             {/* Search Input */}
-            <div className="relative">
+            <div className="relative shrink-0">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={customerSearch}
                 onChange={(e) => setCustomerSearch(e.target.value)}
                 placeholder="Search by outlet name, owner, phone, route..."
-                className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10 text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:border-cyan-500"
+                className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10 text-xs text-slate-900 dark:text-white placeholder-slate-400 focus:outline-hidden focus:border-cyan-500"
                 autoFocus
               />
               {customerSearch && (
@@ -3686,8 +3686,8 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             </div>
 
             {/* Filter by Distributor Dropdown */}
-            <div className="relative">
-              <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-50 dark:bg-black/40 border border-slate-300 dark:border-white/10">
+            <div className="relative shrink-0">
+              <div className="flex items-center gap-1.5 p-1 rounded-xl bg-white dark:bg-black/40 border border-slate-300 dark:border-white/10">
                 <div className="flex items-center gap-1.5 pl-2.5 text-amber-600 dark:text-amber-400 shrink-0">
                   <Building2 className="w-3.5 h-3.5" />
                   <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">Distributor:</span>
@@ -3720,7 +3720,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
 
             {/* Channel Filter Chips */}
             {customerChannels.length > 2 && (
-              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              <div className="shrink-0 flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
                 {customerChannels.map((ch) => (
                   <button
                     key={ch}
@@ -3738,7 +3738,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             )}
 
             {/* Customer List */}
-            <div className="flex-1 overflow-y-auto no-scrollbar space-y-2 pr-0.5 min-h-[220px]">
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar space-y-2 pr-0.5">
               {filteredCustomersList.length === 0 ? (
                 <div className="py-10 text-center space-y-2">
                   <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 mx-auto flex items-center justify-center">
@@ -3774,7 +3774,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
                       className={`p-3 rounded-2xl border cursor-pointer transition-all ${
                         isSelected
                           ? 'bg-cyan-500/15 border-cyan-500 shadow-md ring-1 ring-cyan-500/40'
-                          : 'bg-slate-50 dark:bg-black/30 border-slate-200 dark:border-white/5 hover:bg-slate-100 dark:hover:bg-black/50 hover:border-slate-300 dark:hover:border-white/10'
+                          : 'bg-white dark:bg-[#1e2026] border-slate-200 dark:border-white/5 hover:bg-slate-100/70 dark:hover:bg-black/50 hover:border-slate-300 dark:hover:border-white/10'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -3845,7 +3845,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
             </div>
 
             {/* Bottom Actions */}
-            <div className="pt-2 border-t border-slate-200 dark:border-white/10 flex items-center justify-between gap-2">
+            <div className="shrink-0 pt-2 border-t border-slate-200 dark:border-white/10 flex items-center justify-between gap-2">
               <button
                 onClick={() => {
                   setShowCustomerModal(false);
