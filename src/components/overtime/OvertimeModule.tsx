@@ -77,7 +77,7 @@ export const OvertimeModule: React.FC<OvertimeModuleProps> = ({ initialSubTab = 
   }
 
   // Pending counts for badges
-  const pendingRequestsCount = overtimeRequests.filter(r => r.status !== 'Final Approved' && r.status !== 'Rejected').length;
+  const pendingRequestsCount = overtimeRequests.filter(r => r.status !== 'Final Approved' && r.status !== 'Rejected' && r.status !== 'Cancelled').length;
   const pendingAttendancesCount = overtimeAttendances.filter(a => !a.isVerified).length;
 
   const allTabs = [

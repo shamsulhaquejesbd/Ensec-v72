@@ -3432,6 +3432,9 @@ CREATE TABLE IF NOT EXISTS public.overtime_requests (
   rejection_reason TEXT,
   rejected_by TEXT,
   rejected_at TIMESTAMPTZ,
+  cancellation_reason TEXT,
+  cancelled_by TEXT,
+  cancelled_at TIMESTAMPTZ,
   attendance_id TEXT,
   actual_overtime_hours NUMERIC(5, 2) DEFAULT 0,
   basic_salary_bdt NUMERIC(14, 2) DEFAULT 0,
@@ -3451,6 +3454,9 @@ ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS source_type TEXT N
 ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_id TEXT;
 ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_selected_by TEXT;
 ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_selected_at TIMESTAMPTZ;
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_overtime_requests_employee_date
   ON public.overtime_requests (employee_id, overtime_date)
   WHERE status <> 'Cancelled';

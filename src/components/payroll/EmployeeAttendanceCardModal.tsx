@@ -803,6 +803,16 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     handleDownloadPdf,
   ]);
 
+  const activeEmpGeofence = useMemo(() => {
+    if (!activeEmployee) return null;
+    return resolveGeofenceConfigFromUser(
+      findLinkedUserForEmployee(activeEmployee, users),
+      officeLocations,
+      payrollSettings,
+      activeEmployee.branchWorkplace
+    );
+  }, [activeEmployee, users, officeLocations, payrollSettings]);
+
   if (!isOpen) return null;
 
   const rawCompanyName = payrollSettings?.companyName?.trim();
@@ -818,16 +828,6 @@ export const EmployeeAttendanceCardModal: React.FC<EmployeeAttendanceCardModalPr
     ? '৮/এ ফ্যাক্টরী রোড, শ্যামপুর শি/এ'
     : rawCompanyAddress;
   const companyAddressLine2 = isDefaultAddress ? 'কদম তলী, ঢাকা' : '';
-
-  const activeEmpGeofence = useMemo(() => {
-    if (!activeEmployee) return null;
-    return resolveGeofenceConfigFromUser(
-      findLinkedUserForEmployee(activeEmployee, users),
-      officeLocations,
-      payrollSettings,
-      activeEmployee.branchWorkplace
-    );
-  }, [activeEmployee, users, officeLocations, payrollSettings]);
 
   const shiftLabel =
     activeEmpGeofence && (activeEmpGeofence.shiftStartTime || payrollSettings?.shiftStartTime)

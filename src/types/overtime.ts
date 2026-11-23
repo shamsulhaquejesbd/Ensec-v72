@@ -69,7 +69,7 @@ export interface OvertimeRequest {
   productionBatchNumber?: string;
   productName?: string;
   projectPurpose: string;
-  sourceType?: 'MANUAL' | 'QR_ATTENDANCE_AUTO';
+  sourceType?: 'MANUAL' | 'QR_ATTENDANCE_AUTO' | 'ATTENDANCE_AUTO';
   purposeId?: string;
   purposeSelectedBy?: string;
   purposeSelectedAt?: string;
@@ -112,6 +112,10 @@ export interface OvertimeRequest {
   rejectionReason?: string;
   rejectedBy?: string;
   rejectedAt?: string;
+
+  cancellationReason?: string;
+  cancelledBy?: string;
+  cancelledAt?: string;
   
   // Attendance & Verification Connection
   attendanceId?: string;

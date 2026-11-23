@@ -265,8 +265,12 @@ import {
   calculateEmployeeIndividualOvertime,
 } from '../types/overtime.ts';
 import {
+  findCancelledOvertimeRequest,
   findDuplicateOvertimeRequest,
+  reconcileAttendanceOvertimeRequest,
   reconcileQrOvertimeRequest,
+  type AttendanceOvertimeSourceMode,
+  type QrOvertimeSyncResult,
 } from '../lib/overtimeAutomation.ts';
 import {
   DEFAULT_OVERTIME_POLICY,
@@ -791,6 +795,11 @@ interface ERPContextType {
     backedUp?: boolean;
     error?: string;
     sqlFix?: string;
+    overtimeSync?: {
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    } | null;
   }>;
   bulkMarkAttendance: (records: any, extra?: any) => Promise<{
     success: boolean;
@@ -799,6 +808,13 @@ interface ERPContextType {
     backedUp?: boolean;
     error?: string;
     sqlFix?: string;
+    overtimeSyncResults?: Array<{
+      employeeId?: string;
+      date?: string;
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    }>;
   }>;
   submitGpsCheckIn: (params: {
     employee: FieldForceRep;
@@ -833,6 +849,11 @@ interface ERPContextType {
     errorCode?: string;
     record?: AttendanceRecord;
     rejectedAttempt?: RejectedAttendanceAttempt;
+    overtimeSync?: {
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    } | null;
   }>;
   submitQrAttendanceScan: (qrPayload: string) => Promise<{
     success: boolean;
@@ -5371,7 +5392,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           productionBatchNumber: r.production_batch_number || undefined,
           productName: r.product_name || undefined,
           projectPurpose: r.project_purpose || '',
-          sourceType: (r.source_type || 'MANUAL') as 'MANUAL' | 'QR_ATTENDANCE_AUTO',
+          sourceType: (r.source_type || 'MANUAL') as OvertimeRequest['sourceType'],
           purposeId: r.purpose_id || undefined,
           purposeSelectedBy: r.purpose_selected_by || undefined,
           purposeSelectedAt: r.purpose_selected_at || undefined,
@@ -5401,6 +5422,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           rejectionReason: r.rejection_reason || undefined,
           rejectedBy: r.rejected_by || undefined,
           rejectedAt: r.rejected_at || undefined,
+          cancellationReason: r.cancellation_reason || undefined,
+          cancelledBy: r.cancelled_by || undefined,
+          cancelledAt: r.cancelled_at || undefined,
           attendanceId: r.attendance_id || undefined,
           actualOvertimeHours:
             r.actual_overtime_hours !== null && r.actual_overtime_hours !== undefined
@@ -20927,6 +20951,493 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const mapSupabaseOvertimeRow = (r: any): OvertimeRequest => ({
+    id: String(r.id),
+    requestNumber: r.request_number,
+    employeeId: String(r.employee_id),
+    employeeCode: r.employee_code || '',
+    employeeName: r.employee_name || '',
+    department: r.department || '',
+    designation: r.designation || '',
+    employeeCategory: r.employee_category || undefined,
+    overtimeDate: String(r.overtime_date),
+    purposeCategory: r.purpose_category || 'Direct Production',
+    productionOrderId: r.production_order_id || undefined,
+    productionOrderNumber: r.production_order_number || undefined,
+    productionBatchNumber: r.production_batch_number || undefined,
+    productName: r.product_name || undefined,
+    projectPurpose: r.project_purpose || '',
+    sourceType: (r.source_type || 'MANUAL') as OvertimeRequest['sourceType'],
+    purposeId: r.purpose_id || undefined,
+    purposeSelectedBy: r.purpose_selected_by || undefined,
+    purposeSelectedAt: r.purpose_selected_at || undefined,
+    expectedStartTime: r.expected_start_time || '18:00',
+    expectedEndTime: r.expected_end_time || '22:00',
+    expectedHours: Number(r.expected_hours) || 0,
+    overtimeReason: r.overtime_reason || '',
+    requestedBy: r.requested_by || '',
+    requestedAt: r.requested_at || r.created_at || new Date().toISOString(),
+    status: r.status || 'Pending Supervisor',
+    supervisorId: r.supervisor_id || undefined,
+    supervisorName: r.supervisor_name || undefined,
+    supervisorApprovedAt: r.supervisor_approved_at || undefined,
+    supervisorRemarks: r.supervisor_remarks || undefined,
+    productionManagerId: r.production_manager_id || undefined,
+    productionManagerName: r.production_manager_name || undefined,
+    productionApprovedAt: r.production_approved_at || undefined,
+    productionRemarks: r.production_remarks || undefined,
+    hrVerifierId: r.hr_verifier_id || undefined,
+    hrVerifierName: r.hr_verifier_name || undefined,
+    hrVerifiedAt: r.hr_verified_at || undefined,
+    hrRemarks: r.hr_remarks || undefined,
+    finalApproverId: r.final_approver_id || undefined,
+    finalApproverName: r.final_approver_name || undefined,
+    finalApprovedAt: r.final_approved_at || undefined,
+    finalRemarks: r.final_remarks || undefined,
+    rejectionReason: r.rejection_reason || undefined,
+    rejectedBy: r.rejected_by || undefined,
+    rejectedAt: r.rejected_at || undefined,
+    cancellationReason: r.cancellation_reason || undefined,
+    cancelledBy: r.cancelled_by || undefined,
+    cancelledAt: r.cancelled_at || undefined,
+    attendanceId: r.attendance_id || undefined,
+    actualOvertimeHours:
+      r.actual_overtime_hours !== null && r.actual_overtime_hours !== undefined
+        ? Number(r.actual_overtime_hours)
+        : undefined,
+    basicSalaryBDT: Number(r.basic_salary_bdt) || 0,
+    hourlyRateBDT: Number(r.hourly_rate_bdt) || 0,
+    overtimeMultiplier:
+      r.overtime_multiplier !== null &&
+      r.overtime_multiplier !== undefined &&
+      !Number.isNaN(Number(r.overtime_multiplier))
+        ? Number(r.overtime_multiplier)
+        : 2.0,
+    calculatedOvertimeAmountBDT: Number(r.calculated_overtime_amount_bdt) || 0,
+    batchAllocations: [],
+    isPayrollProcessed: Boolean(r.is_payroll_processed),
+    payrollRunId: r.payroll_run_id || undefined,
+    payrollMonth: r.payroll_month || undefined,
+    isCostingAllocated: Boolean(r.is_costing_allocated),
+    costingAllocationBatch: r.costing_allocation_batch || undefined,
+    createdAt: r.created_at || new Date().toISOString(),
+    updatedAt: r.updated_at || undefined,
+  });
+
+  const upsertOvertimeRequestInState = (otReq: OvertimeRequest) => {
+    setOvertimeRequests((prev) => {
+      const idx = prev.findIndex(
+        (r) =>
+          r.id === otReq.id ||
+          (otReq.status !== 'Cancelled' &&
+            r.status !== 'Cancelled' &&
+            r.employeeId === otReq.employeeId &&
+            r.overtimeDate === otReq.overtimeDate)
+      );
+      if (idx >= 0) {
+        return prev.map((r, i) => (i === idx ? { ...r, ...otReq } : r));
+      }
+      return [otReq, ...prev];
+    });
+  };
+
+  const appendLocalOvertimeAuditLogOnly = (log: Omit<OvertimeAuditTrail, 'id' | 'timestamp'>) => {
+    const newLog: OvertimeAuditTrail = {
+      ...log,
+      id: `ot-aud-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: new Date().toISOString(),
+    };
+    setOvertimeAuditLogs((prev) => [newLog, ...prev]);
+  };
+
+  const applyServerOvertimeSyncToState = (
+    syncResult: { action?: string; request?: OvertimeRequest; message?: string } | null | undefined,
+    actorLabel?: string
+  ) => {
+    if (!syncResult) return;
+    if (
+      (syncResult.action === 'CREATED' ||
+        syncResult.action === 'UPDATED' ||
+        syncResult.action === 'CANCELLED') &&
+      syncResult.request
+    ) {
+      upsertOvertimeRequestInState(syncResult.request);
+      if (syncResult.message) {
+        appendLocalOvertimeAuditLogOnly({
+          recordId: syncResult.request.id,
+          recordType: 'REQUEST',
+          action: `ATTENDANCE_AUTO_${syncResult.action}`,
+          actorName: actorLabel || currentUser?.name || 'Attendance Synchronization',
+          actorRole: currentUser?.role || 'System',
+          details: syncResult.message,
+          newState: syncResult.request.status,
+        });
+      }
+    } else if (
+      (syncResult.action === 'LOCKED_APPROVED' ||
+        syncResult.action === 'LOCKED_REJECTED' ||
+        syncResult.action === 'LOCKED_CANCELLED') &&
+      syncResult.request &&
+      syncResult.message
+    ) {
+      appendLocalOvertimeAuditLogOnly({
+        recordId: syncResult.request.id,
+        recordType: 'REQUEST',
+        action: `ATTENDANCE_SYNC_${syncResult.action}`,
+        actorName: actorLabel || currentUser?.name || 'Attendance Synchronization',
+        actorRole: currentUser?.role || 'System',
+        details: syncResult.message,
+        previousState: syncResult.request.status,
+        newState: syncResult.request.status,
+      });
+    }
+  };
+
+  const syncAttendanceToOvertimeClientFallback = async (params: {
+    attendanceRecord: AttendanceRecord;
+    sourceMode: AttendanceOvertimeSourceMode;
+    existingRequestsSnapshot?: OvertimeRequest[];
+    dbSyncedAttendance?: boolean;
+  }): Promise<{
+    action: QrOvertimeSyncResult['action'];
+    request?: OvertimeRequest;
+    message: string;
+    nextRequestsSnapshot: OvertimeRequest[];
+  }> => {
+    const {
+      attendanceRecord,
+      sourceMode,
+      existingRequestsSnapshot = overtimeRequests,
+      dbSyncedAttendance = false,
+    } = params;
+
+    const emp =
+      fieldForceReps.find(
+        (r) =>
+          String(r.id) === String(attendanceRecord.employeeId) ||
+          (attendanceRecord.employeeCode &&
+            r.code &&
+            r.code.toLowerCase() === attendanceRecord.employeeCode.toLowerCase())
+      ) || {
+        id: attendanceRecord.employeeId,
+        code: attendanceRecord.employeeCode || 'EMP-000',
+        name: attendanceRecord.employeeName || 'Staff Member',
+        department: attendanceRecord.department || 'Operations',
+        designation: attendanceRecord.designation || 'Staff',
+        employeeCategory: attendanceRecord.employeeCategory,
+        basicSalaryBDT: 25000,
+      };
+
+    const str = salaryStructures.find(
+      (s) => s.employeeId === emp.id || (emp.code && s.employeeCode === emp.code)
+    );
+    const basic = str ? str.basicSalaryBDT : emp.basicSalaryBDT || 25000;
+    const gross = str ? str.grossSalaryBDT : Math.round(basic * 1.6);
+    const policy = getEmployeeEffectiveOvertimePolicy(emp.id, attendanceRecord.date);
+    const actorName =
+      sourceMode === 'QR'
+        ? currentUser?.name || 'QR Attendance Automation'
+        : currentUser?.name || 'Attendance Synchronization';
+
+    const beforeActive = findDuplicateOvertimeRequest(
+      existingRequestsSnapshot,
+      emp.id,
+      emp.code,
+      attendanceRecord.date
+    );
+    const beforeCancelled = !beforeActive
+      ? findCancelledOvertimeRequest(
+          existingRequestsSnapshot,
+          emp.id,
+          emp.code,
+          attendanceRecord.date
+        )
+      : undefined;
+    const beforeOt = beforeActive || beforeCancelled || null;
+
+    // If Supabase persisted the attendance row, check whether PostgreSQL trigger already synced overtime_requests
+    const sb = getSupabase();
+    if (sb && dbSyncedAttendance && attendanceRecord.date) {
+      try {
+        const { data: dbOtRows } = await sb
+          .from('overtime_requests')
+          .select('*')
+          .eq('overtime_date', attendanceRecord.date)
+          .order('created_at', { ascending: false });
+        if (Array.isArray(dbOtRows)) {
+          const mappedDbRows = dbOtRows.map(mapSupabaseOvertimeRow);
+          const dbActive = findDuplicateOvertimeRequest(
+            mappedDbRows,
+            emp.id,
+            emp.code,
+            attendanceRecord.date
+          );
+          const dbCancelled = !dbActive
+            ? findCancelledOvertimeRequest(
+                mappedDbRows,
+                emp.id,
+                emp.code,
+                attendanceRecord.date
+              )
+            : undefined;
+          const afterDbRow = dbActive || dbCancelled || null;
+
+          const triggerHandled = Boolean(
+            afterDbRow &&
+              ((!beforeOt && afterDbRow.status !== 'Cancelled') ||
+                (beforeOt &&
+                  beforeOt.id === afterDbRow.id &&
+                  (beforeOt.status !== afterDbRow.status ||
+                    beforeOt.expectedHours !== afterDbRow.expectedHours ||
+                    beforeOt.expectedEndTime !== afterDbRow.expectedEndTime ||
+                    beforeOt.expectedStartTime !== afterDbRow.expectedStartTime)))
+          );
+
+          if (triggerHandled && afterDbRow) {
+            upsertOvertimeRequestInState(afterDbRow);
+            const inferredAction: QrOvertimeSyncResult['action'] = !beforeOt
+              ? 'CREATED'
+              : afterDbRow.status === 'Cancelled' && beforeOt.status !== 'Cancelled'
+              ? 'CANCELLED'
+              : 'UPDATED';
+            const inferredMsg =
+              inferredAction === 'CREATED'
+                ? `Auto-generated Overtime Request ${afterDbRow.requestNumber} (${afterDbRow.expectedHours}h OT on ${attendanceRecord.date}).`
+                : inferredAction === 'CANCELLED'
+                ? `Cancelled Pending Overtime Request ${afterDbRow.requestNumber}: ${
+                    afterDbRow.cancellationReason || 'Attendance OUT Time Updated – No Overtime'
+                  }.`
+                : `Updated pending Overtime Request ${afterDbRow.requestNumber} to ${afterDbRow.expectedHours}h.`;
+
+            appendLocalOvertimeAuditLogOnly({
+              recordId: afterDbRow.id,
+              recordType: 'REQUEST',
+              action:
+                sourceMode === 'QR'
+                  ? `QR_AUTO_${inferredAction}`
+                  : `ATTENDANCE_AUTO_${inferredAction}`,
+              actorName,
+              actorRole: currentUser?.role || 'System',
+              details: inferredMsg,
+              previousState: beforeOt?.status,
+              newState: afterDbRow.status,
+            });
+
+            const idx = existingRequestsSnapshot.findIndex(
+              (r) =>
+                r.id === afterDbRow.id ||
+                (afterDbRow.status !== 'Cancelled' &&
+                  r.status !== 'Cancelled' &&
+                  r.employeeId === afterDbRow.employeeId &&
+                  r.overtimeDate === afterDbRow.overtimeDate)
+            );
+            const nextSnapshot =
+              idx >= 0
+                ? existingRequestsSnapshot.map((r, i) => (i === idx ? afterDbRow : r))
+                : [afterDbRow, ...existingRequestsSnapshot];
+
+            return {
+              action: inferredAction,
+              request: afterDbRow,
+              message: inferredMsg,
+              nextRequestsSnapshot: nextSnapshot,
+            };
+          }
+        }
+      } catch {
+        // Proceed with standard client-side reconciliation fallback
+      }
+    }
+
+    const otResult = reconcileAttendanceOvertimeRequest({
+      existingRequests: existingRequestsSnapshot,
+      attendanceRecord,
+      employee: {
+        id: emp.id,
+        code: emp.code,
+        name: emp.name,
+        department: emp.department,
+        designation: emp.designation,
+        employeeCategory: emp.employeeCategory,
+        basicSalaryBDT: basic,
+      },
+      salaryBasicBDT: basic,
+      salaryGrossBDT: gross,
+      policy,
+      defaultShiftEndTime: payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
+      defaultShiftStartTime: payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
+      nowIso: attendanceRecord.updatedAt || new Date().toISOString(),
+      sourceMode,
+      actorName,
+    });
+
+    let nextRequestsSnapshot = existingRequestsSnapshot;
+
+    if (
+      (otResult.action === 'CREATED' ||
+        otResult.action === 'UPDATED' ||
+        otResult.action === 'CANCELLED') &&
+      otResult.request
+    ) {
+      const otReq = otResult.request;
+      upsertOvertimeRequestInState(otReq);
+      const idx = existingRequestsSnapshot.findIndex(
+        (r) =>
+          r.id === otReq.id ||
+          (otReq.status !== 'Cancelled' &&
+            r.status !== 'Cancelled' &&
+            r.employeeId === otReq.employeeId &&
+            r.overtimeDate === otReq.overtimeDate)
+      );
+      nextRequestsSnapshot =
+        idx >= 0
+          ? existingRequestsSnapshot.map((r, i) => (i === idx ? otReq : r))
+          : [otReq, ...existingRequestsSnapshot];
+
+      if (sb) {
+        if (otResult.action === 'CANCELLED') {
+          const cancelFields: Record<string, any> = {
+            status: 'Cancelled',
+            attendance_id: otReq.attendanceId || null,
+            actual_overtime_hours: 0,
+            cancellation_reason:
+              otReq.cancellationReason || 'Attendance OUT Time Updated – No Overtime',
+            cancelled_by: otReq.cancelledBy || actorName,
+            cancelled_at: otReq.cancelledAt || new Date().toISOString(),
+            rejection_reason:
+              otReq.cancellationReason || 'Attendance OUT Time Updated – No Overtime',
+            updated_at: otReq.updatedAt || new Date().toISOString(),
+          };
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const { error } = await sb
+              .from('overtime_requests')
+              .update(cancelFields)
+              .eq('id', otReq.id);
+            if (!error) break;
+            const msg = String(error.message || '');
+            const missingCol =
+              error.code === 'PGRST204' || msg.includes('schema cache')
+                ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
+                : error.code === '42703' || msg.toLowerCase().includes('does not exist')
+                ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
+                  msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
+                : null;
+            if (missingCol && Object.prototype.hasOwnProperty.call(cancelFields, missingCol)) {
+              delete cancelFields[missingCol];
+              continue;
+            }
+            break;
+          }
+        } else if (otResult.action === 'UPDATED') {
+          await sb
+            .from('overtime_requests')
+            .update({
+              expected_start_time: otReq.expectedStartTime,
+              expected_end_time: otReq.expectedEndTime,
+              expected_hours: otReq.expectedHours,
+              actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
+              attendance_id: otReq.attendanceId || null,
+              basic_salary_bdt: otReq.basicSalaryBDT || 0,
+              hourly_rate_bdt: otReq.hourlyRateBDT || 0,
+              overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
+              calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
+              overtime_reason: otReq.overtimeReason,
+              updated_at: otReq.updatedAt || new Date().toISOString(),
+            })
+            .eq('id', otReq.id);
+        } else {
+          const workingPayload: Record<string, any> = {
+            id: otReq.id,
+            request_number: otReq.requestNumber,
+            employee_id: otReq.employeeId,
+            employee_code: otReq.employeeCode,
+            employee_name: otReq.employeeName,
+            department: otReq.department,
+            designation: otReq.designation,
+            employee_category: otReq.employeeCategory || 'Factory Employee',
+            overtime_date: otReq.overtimeDate,
+            purpose_category: otReq.purposeCategory,
+            project_purpose: otReq.projectPurpose ?? '',
+            source_type: otReq.sourceType || 'ATTENDANCE_AUTO',
+            expected_start_time: otReq.expectedStartTime,
+            expected_end_time: otReq.expectedEndTime,
+            expected_hours: otReq.expectedHours,
+            overtime_reason: otReq.overtimeReason,
+            requested_by: otReq.requestedBy,
+            requested_at: otReq.requestedAt,
+            status: otReq.status,
+            attendance_id: otReq.attendanceId || null,
+            actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
+            basic_salary_bdt: otReq.basicSalaryBDT || 0,
+            hourly_rate_bdt: otReq.hourlyRateBDT || 0,
+            overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
+            calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
+            is_payroll_processed: false,
+            is_costing_allocated: false,
+            created_at: otReq.createdAt,
+            updated_at: otReq.updatedAt || new Date().toISOString(),
+          };
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const { error } = await sb
+              .from('overtime_requests')
+              .upsert(workingPayload, { onConflict: 'id' });
+            if (!error) break;
+            const msg = String(error.message || '');
+            const missingCol =
+              error.code === 'PGRST204' || msg.includes('schema cache')
+                ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
+                : error.code === '42703' || msg.toLowerCase().includes('does not exist')
+                ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
+                  msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
+                : null;
+            if (missingCol && Object.prototype.hasOwnProperty.call(workingPayload, missingCol)) {
+              delete workingPayload[missingCol];
+              continue;
+            }
+            break;
+          }
+        }
+      }
+
+      addOvertimeAuditLog({
+        recordId: otReq.id,
+        recordType: 'REQUEST',
+        action:
+          sourceMode === 'QR'
+            ? `QR_AUTO_${otResult.action}`
+            : `ATTENDANCE_AUTO_${otResult.action}`,
+        actorName,
+        actorRole: currentUser?.role || 'System',
+        details: otResult.auditDetails || otResult.message,
+        previousState: otResult.previousStatus,
+        newState: otReq.status,
+      });
+    } else if (
+      (otResult.action === 'LOCKED_APPROVED' ||
+        otResult.action === 'LOCKED_REJECTED' ||
+        otResult.action === 'LOCKED_CANCELLED') &&
+      otResult.request
+    ) {
+      addOvertimeAuditLog({
+        recordId: otResult.request.id,
+        recordType: 'REQUEST',
+        action: `ATTENDANCE_SYNC_${otResult.action}`,
+        actorName,
+        actorRole: currentUser?.role || 'System',
+        details: otResult.auditDetails || otResult.message,
+        previousState: otResult.request.status,
+        newState: otResult.request.status,
+      });
+    }
+
+    return {
+      action: otResult.action,
+      request: otResult.request,
+      message: otResult.message,
+      nextRequestsSnapshot,
+    };
+  };
+
   const markAttendance = async (
     record: Omit<AttendanceRecord, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<{
@@ -20936,6 +21447,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     backedUp?: boolean;
     error?: string;
     sqlFix?: string;
+    overtimeSync?: {
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    } | null;
   }> => {
     if (!hasPageAction(currentUser, 'payroll', 'create_payroll')) {
       console.warn('Permission denied: create_payroll required to mark or override attendance.');
@@ -20957,7 +21473,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (a.employeeId === record.employeeId || a.fieldForceId === record.employeeId) &&
         a.date === record.date
     );
-    const id = existing?.id || `att-${record.employeeId || 'emp'}-${record.date}-${Date.now().toString().slice(-4)}`;
+    const id =
+      existing?.id || `att-${record.employeeId || 'emp'}-${record.date}-${Date.now().toString().slice(-4)}`;
     const now = new Date().toISOString();
     const inVal = record.inTime ?? record.checkInTime;
     const outVal = record.outTime ?? record.checkOutTime;
@@ -20977,18 +21494,124 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const nextSnapshot = [
       newRecord,
-      ...attendanceRecords.filter((a) => !(a.employeeId === record.employeeId && a.date === record.date)),
+      ...attendanceRecords.filter(
+        (a) =>
+          !(
+            (a.employeeId === record.employeeId || a.fieldForceId === record.employeeId) &&
+            a.date === record.date
+          )
+      ),
     ];
     setAttendanceRecords(nextSnapshot);
 
+    const logManualAttendance = () =>
+      addAuditLog(
+        'ATTENDANCE_MARKED',
+        'HR & Payroll',
+        `Updated attendance for ${newRecord.employeeName} (${newRecord.date}): ${newRecord.status}${
+          newRecord.inTime ? ` In ${newRecord.inTime}` : ''
+        }${newRecord.outTime ? ` Out ${newRecord.outTime}` : ''}`
+      );
+
+    // Attempt server-backed atomic upsert + OT reconciliation first
+    const callManualUpsertApi = async (overrideToken?: string | null) =>
+      fetch('/api/attendance/manual-upsert', {
+        method: 'POST',
+        headers: getErpAuthHeaders(overrideToken),
+        body: JSON.stringify({
+          record: newRecord,
+          employeesSnapshot: fieldForceReps,
+          payrollSettings,
+        }),
+      });
+
+    try {
+      let resp = await callManualUpsertApi();
+      if (resp.status === 401 && isAuthenticated && currentUser?.id && currentUser.id !== 'guest') {
+        const freshToken = await establishServerSession(currentUser);
+        if (freshToken) {
+          resp = await callManualUpsertApi(freshToken);
+        }
+      }
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+      const rawText = await resp.text();
+      const parsed = tryParseJsonSafe(rawText);
+      const data = parsed.data;
+      if (
+        contentType.includes('application/json') &&
+        parsed.ok &&
+        resp.ok &&
+        data?.success &&
+        Array.isArray(data.records)
+      ) {
+        const savedRec: AttendanceRecord = data.records[0] || newRecord;
+        const syncedSnapshot = [
+          savedRec,
+          ...nextSnapshot.filter(
+            (a) =>
+              !(
+                (a.employeeId === savedRec.employeeId || a.fieldForceId === savedRec.employeeId) &&
+                a.date === savedRec.date
+              )
+          ),
+        ];
+        setAttendanceRecords(syncedSnapshot);
+
+        let dbSynced = Boolean(data.dbSynced);
+        let dbError = data.dbError as string | undefined;
+        let sqlFix: string | undefined;
+        let backedUp: boolean | undefined;
+        let overtimeSync = (Array.isArray(data.overtimeSyncResults)
+          ? data.overtimeSyncResults[0]
+          : null) || null;
+
+        if (!dbSynced) {
+          const persistFallback = await persistAttendanceRecordsToSupabase([savedRec], syncedSnapshot);
+          dbSynced = persistFallback.dbSynced;
+          dbError = persistFallback.error || dbError;
+          sqlFix = persistFallback.sqlFix;
+          backedUp = persistFallback.backedUp;
+        } else {
+          setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
+        }
+
+        if (overtimeSync) {
+          applyServerOvertimeSyncToState(overtimeSync, currentUser?.name);
+        } else {
+          const otClient = await syncAttendanceToOvertimeClientFallback({
+            attendanceRecord: savedRec,
+            sourceMode: 'MANUAL',
+            dbSyncedAttendance: dbSynced,
+          });
+          overtimeSync = {
+            action: otClient.action,
+            request: otClient.request,
+            message: otClient.message,
+          };
+        }
+
+        logManualAttendance();
+        return {
+          success: true,
+          id: savedRec.id || id,
+          dbSynced,
+          backedUp,
+          error: dbError,
+          sqlFix,
+          overtimeSync,
+        };
+      }
+    } catch {
+      // Static SPA or unreachable backend -> proceed with direct Supabase + client fallback
+    }
+
     const persistResult = await persistAttendanceRecordsToSupabase([newRecord], nextSnapshot);
-    addAuditLog(
-      'ATTENDANCE_MARKED',
-      'HR & Payroll',
-      `Updated attendance for ${newRecord.employeeName} (${newRecord.date}): ${newRecord.status}${
-        newRecord.inTime ? ` In ${newRecord.inTime}` : ''
-      }${newRecord.outTime ? ` Out ${newRecord.outTime}` : ''}`
-    );
+    const otFallback = await syncAttendanceToOvertimeClientFallback({
+      attendanceRecord: newRecord,
+      sourceMode: 'MANUAL',
+      dbSyncedAttendance: persistResult.dbSynced,
+    });
+    logManualAttendance();
 
     return {
       success: true,
@@ -20997,6 +21620,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       backedUp: persistResult.backedUp,
       error: persistResult.error,
       sqlFix: persistResult.sqlFix,
+      overtimeSync: {
+        action: otFallback.action,
+        request: otFallback.request,
+        message: otFallback.message,
+      },
     };
   };
 
@@ -21009,6 +21637,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     backedUp?: boolean;
     error?: string;
     sqlFix?: string;
+    overtimeSyncResults?: Array<{
+      employeeId?: string;
+      date?: string;
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    }>;
   }> => {
     if (!hasPageAction(currentUser, 'payroll', 'create_payroll')) {
       console.warn('Permission denied: create_payroll required to bulk mark attendance.');
@@ -21054,7 +21689,107 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ];
     setAttendanceRecords(nextSnapshot);
 
+    const callBulkApi = async (overrideToken?: string | null) =>
+      fetch('/api/attendance/manual-upsert', {
+        method: 'POST',
+        headers: getErpAuthHeaders(overrideToken),
+        body: JSON.stringify({
+          records: newItems,
+          employeesSnapshot: fieldForceReps,
+          payrollSettings,
+        }),
+      });
+
+    try {
+      let resp = await callBulkApi();
+      if (resp.status === 401 && isAuthenticated && currentUser?.id && currentUser.id !== 'guest') {
+        const freshToken = await establishServerSession(currentUser);
+        if (freshToken) {
+          resp = await callBulkApi(freshToken);
+        }
+      }
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+      const rawText = await resp.text();
+      const parsed = tryParseJsonSafe(rawText);
+      const data = parsed.data;
+      if (
+        contentType.includes('application/json') &&
+        parsed.ok &&
+        resp.ok &&
+        data?.success &&
+        Array.isArray(data.records)
+      ) {
+        const srvRecords: AttendanceRecord[] = data.records;
+        const srvKeys = new Set(srvRecords.map((i) => `${i.employeeId}_${i.date}`));
+        const syncedSnapshot = [
+          ...srvRecords,
+          ...nextSnapshot.filter((p) => !srvKeys.has(`${p.employeeId}_${p.date}`)),
+        ];
+        setAttendanceRecords(syncedSnapshot);
+
+        let dbSynced = Boolean(data.dbSynced);
+        let syncedCount = dbSynced ? srvRecords.length : 0;
+        let backedUp: boolean | undefined;
+        let dbError = data.dbError as string | undefined;
+        let sqlFix: string | undefined;
+
+        if (!dbSynced) {
+          const persistFallback = await persistAttendanceRecordsToSupabase(srvRecords, syncedSnapshot);
+          dbSynced = persistFallback.dbSynced;
+          syncedCount = persistFallback.syncedCount;
+          backedUp = persistFallback.backedUp;
+          dbError = persistFallback.error || dbError;
+          sqlFix = persistFallback.sqlFix;
+        } else {
+          setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
+        }
+
+        const otResults = Array.isArray(data.overtimeSyncResults) ? data.overtimeSyncResults : [];
+        for (const r of otResults) {
+          applyServerOvertimeSyncToState(r, currentUser?.name);
+        }
+
+        addAuditLog('ATTENDANCE_BULK_LOGGED', 'HR & Payroll', `Marked attendance for ${records.length} employees`);
+        return {
+          success: true,
+          dbSynced,
+          syncedCount,
+          backedUp,
+          error: dbError,
+          sqlFix,
+          overtimeSyncResults: otResults,
+        };
+      }
+    } catch {
+      // Static SPA or unreachable backend -> fall back cleanly
+    }
+
     const persistResult = await persistAttendanceRecordsToSupabase(newItems, nextSnapshot);
+    const overtimeSyncResults: Array<{
+      employeeId?: string;
+      date?: string;
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    }> = [];
+    let workingReqs = [...overtimeRequests];
+    for (const item of newItems) {
+      const otRes = await syncAttendanceToOvertimeClientFallback({
+        attendanceRecord: item,
+        sourceMode: 'MANUAL',
+        existingRequestsSnapshot: workingReqs,
+        dbSyncedAttendance: persistResult.dbSynced,
+      });
+      workingReqs = otRes.nextRequestsSnapshot;
+      overtimeSyncResults.push({
+        employeeId: item.employeeId,
+        date: item.date,
+        action: otRes.action,
+        request: otRes.request,
+        message: otRes.message,
+      });
+    }
+
     addAuditLog('ATTENDANCE_BULK_LOGGED', 'HR & Payroll', `Marked attendance for ${records.length} employees`);
 
     return {
@@ -21064,6 +21799,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       backedUp: persistResult.backedUp,
       error: persistResult.error,
       sqlFix: persistResult.sqlFix,
+      overtimeSyncResults,
     };
   };
 
@@ -21412,6 +22148,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } else {
           setAttendanceDbStatus({ synced: true, status: 'synced', error: null, sqlFix: null });
         }
+        if (data.overtimeSync) {
+          applyServerOvertimeSyncToState(data.overtimeSync, currentUser?.name || employee.name);
+        }
         updateRepLocation(employee.id, latitude, longitude, `${cfg.assignedOfficeName} (GPS Check-Out)`);
         addAuditLog(
           'GPS_CHECK_OUT_ACCEPTED',
@@ -21502,13 +22241,23 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...attendanceRecords.filter((a) => !(a.employeeId === employee.id && a.date === todayStr)),
       ];
       setAttendanceRecords(nextSnapshot);
-      await persistAttendanceRecordsToSupabase([updatedRec], nextSnapshot);
+      const persistRes = await persistAttendanceRecordsToSupabase([updatedRec], nextSnapshot);
+      const otRes = await syncAttendanceToOvertimeClientFallback({
+        attendanceRecord: updatedRec,
+        sourceMode: 'GPS',
+        dbSyncedAttendance: persistRes.dbSynced,
+      });
       return {
         accepted: true,
         distanceMeters: validation.distanceMeters,
         allowedRadiusMeters: validation.allowedRadiusMeters,
         reason: validation.reason,
         record: updatedRec,
+        overtimeSync: {
+          action: otRes.action,
+          request: otRes.request,
+          message: otRes.message,
+        },
       };
     }
   };
@@ -21803,151 +22552,18 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      const upsertAutoOvertimeRequestInState = (otReq: OvertimeRequest) => {
-        setOvertimeRequests((prev) => {
-          const exists = prev.some(
-            (r) =>
-              r.id === otReq.id ||
-              (r.employeeId === otReq.employeeId &&
-                r.overtimeDate === otReq.overtimeDate &&
-                r.status !== 'Cancelled')
-          );
-          if (exists) {
-            return prev.map((r) =>
-              r.id === otReq.id ||
-              (r.employeeId === otReq.employeeId &&
-                r.overtimeDate === otReq.overtimeDate &&
-                r.status !== 'Cancelled')
-                ? otReq
-                : r
-            );
-          }
-          return [otReq, ...prev];
-        });
-      };
-
       const syncAutoOvertimeClientSide = async (
-        scannedRecord: AttendanceRecord,
-        emp: FieldForceRep
+        scannedRecord: AttendanceRecord
       ) => {
-        const str = salaryStructures.find(
-          (s) => s.employeeId === emp.id || (emp.code && s.employeeCode === emp.code)
-        );
-        const basic = str ? str.basicSalaryBDT : emp.basicSalaryBDT || 25000;
-        const gross = str ? str.grossSalaryBDT : Math.round(basic * 1.6);
-        const policy = getEmployeeEffectiveOvertimePolicy(emp.id, scannedRecord.date);
-
-        const otResult = reconcileQrOvertimeRequest({
-          existingRequests: overtimeRequests,
+        const res = await syncAttendanceToOvertimeClientFallback({
           attendanceRecord: scannedRecord,
-          employee: {
-            id: emp.id,
-            code: emp.code,
-            name: emp.name,
-            department: emp.department,
-            designation: emp.designation,
-            employeeCategory: emp.employeeCategory,
-            basicSalaryBDT: basic,
-          },
-          salaryBasicBDT: basic,
-          salaryGrossBDT: gross,
-          policy,
-          defaultShiftEndTime: payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
-          defaultShiftStartTime: payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
-          nowIso: scannedRecord.updatedAt || new Date().toISOString(),
+          sourceMode: 'QR',
+          dbSyncedAttendance: true,
         });
-
-        if ((otResult.action === 'CREATED' || otResult.action === 'UPDATED') && otResult.request) {
-          const otReq = otResult.request;
-          upsertAutoOvertimeRequestInState(otReq);
-
-          const sb = getSupabase();
-          if (sb) {
-            if (otResult.action === 'UPDATED') {
-              await sb
-                .from('overtime_requests')
-                .update({
-                  expected_end_time: otReq.expectedEndTime,
-                  expected_hours: otReq.expectedHours,
-                  actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
-                  attendance_id: otReq.attendanceId || null,
-                  basic_salary_bdt: otReq.basicSalaryBDT || 0,
-                  hourly_rate_bdt: otReq.hourlyRateBDT || 0,
-                  overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
-                  calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
-                  overtime_reason: otReq.overtimeReason,
-                  updated_at: otReq.updatedAt || new Date().toISOString(),
-                })
-                .eq('id', otReq.id);
-            } else {
-              const workingPayload: Record<string, any> = {
-                id: otReq.id,
-                request_number: otReq.requestNumber,
-                employee_id: otReq.employeeId,
-                employee_code: otReq.employeeCode,
-                employee_name: otReq.employeeName,
-                department: otReq.department,
-                designation: otReq.designation,
-                employee_category: otReq.employeeCategory || 'Factory Employee',
-                overtime_date: otReq.overtimeDate,
-                purpose_category: otReq.purposeCategory,
-                project_purpose: otReq.projectPurpose ?? '',
-                source_type: otReq.sourceType || 'QR_ATTENDANCE_AUTO',
-                expected_start_time: otReq.expectedStartTime,
-                expected_end_time: otReq.expectedEndTime,
-                expected_hours: otReq.expectedHours,
-                overtime_reason: otReq.overtimeReason,
-                requested_by: otReq.requestedBy,
-                requested_at: otReq.requestedAt,
-                status: otReq.status,
-                attendance_id: otReq.attendanceId || null,
-                actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
-                basic_salary_bdt: otReq.basicSalaryBDT || 0,
-                hourly_rate_bdt: otReq.hourlyRateBDT || 0,
-                overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
-                calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
-                is_payroll_processed: false,
-                is_costing_allocated: false,
-                created_at: otReq.createdAt,
-                updated_at: otReq.updatedAt || new Date().toISOString(),
-              };
-              for (let attempt = 0; attempt < 6; attempt++) {
-                const { error } = await sb
-                  .from('overtime_requests')
-                  .upsert(workingPayload, { onConflict: 'id' });
-                if (!error) break;
-                const msg = String(error.message || '');
-                const missingCol =
-                  error.code === 'PGRST204' || msg.includes('schema cache')
-                    ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
-                    : error.code === '42703' || msg.toLowerCase().includes('does not exist')
-                    ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
-                      msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
-                    : null;
-                if (missingCol && Object.prototype.hasOwnProperty.call(workingPayload, missingCol)) {
-                  delete workingPayload[missingCol];
-                  continue;
-                }
-                break;
-              }
-            }
-          }
-
-          addOvertimeAuditLog({
-            recordId: otReq.id,
-            recordType: 'REQUEST',
-            action: otResult.action === 'CREATED' ? 'QR_AUTO_CREATED' : 'QR_AUTO_UPDATED',
-            actorName: currentUser?.name || 'QR Attendance Automation',
-            actorRole: currentUser?.role || 'System',
-            details: otResult.message,
-            newState: otReq.status,
-          });
-        }
-
         return {
-          action: otResult.action,
-          request: otResult.request,
-          message: otResult.message,
+          action: res.action,
+          request: res.request,
+          message: res.message,
         };
       };
 
@@ -21955,7 +22571,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       applyScannedRecordToState(nextRecord, false);
       let overtimeSyncResult: any = null;
       if (action === 'OUT' || action === 'OUT_UPDATE') {
-        overtimeSyncResult = await syncAutoOvertimeClientSide(nextRecord, resolvedRep);
+        overtimeSyncResult = await syncAutoOvertimeClientSide(nextRecord);
       }
       addAuditLog(
         action === 'IN' ? 'QR_ATTENDANCE_IN' : 'QR_ATTENDANCE_OUT',
@@ -22050,28 +22666,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         applyScannedRecordToState(scannedRecord, finalDbSynced);
       }
 
-      if (data?.overtimeSync?.request) {
-        const srvOtReq = data.overtimeSync.request as OvertimeRequest;
-        setOvertimeRequests((prev) => {
-          const exists = prev.some(
-            (r) =>
-              r.id === srvOtReq.id ||
-              (r.employeeId === srvOtReq.employeeId &&
-                r.overtimeDate === srvOtReq.overtimeDate &&
-                r.status !== 'Cancelled')
-          );
-          if (exists) {
-            return prev.map((r) =>
-              r.id === srvOtReq.id ||
-              (r.employeeId === srvOtReq.employeeId &&
-                r.overtimeDate === srvOtReq.overtimeDate &&
-                r.status !== 'Cancelled')
-                ? srvOtReq
-                : r
-            );
-          }
-          return [srvOtReq, ...prev];
-        });
+      if (data?.overtimeSync) {
+        applyServerOvertimeSyncToState(data.overtimeSync, currentUser?.name || data?.employee?.name);
       }
 
       if (data?.employee?.name) {

@@ -312,6 +312,11 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
                     QR Attendance Auto
                   </span>
                 )}
+                {request.sourceType === 'ATTENDANCE_AUTO' && (
+                  <span className="ml-auto px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 text-[10px] font-bold">
+                    Attendance Auto
+                  </span>
+                )}
               </div>
               <div>
                 <strong>Reason:</strong> {request.overtimeReason || '—'}

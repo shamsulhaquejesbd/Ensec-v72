@@ -188,6 +188,8 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
         return 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-300 dark:border-amber-800';
       case 'Rejected':
         return 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border-rose-300 dark:border-rose-800';
+      case 'Cancelled':
+        return 'bg-slate-200/80 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700';
       default:
         return 'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-300 border-slate-300';
     }
@@ -240,6 +242,7 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
             <option value="HR Verified">HR Verified (Step 4)</option>
             <option value="Final Approved">Final Approved</option>
             <option value="Rejected">Rejected</option>
+            <option value="Cancelled">Cancelled</option>
           </select>
 
           {/* Department Filter */}
@@ -336,6 +339,11 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
                             QR Auto
                           </span>
                         )}
+                        {req.sourceType === 'ATTENDANCE_AUTO' && (
+                          <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
+                            Attendance Auto
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded font-mono font-bold text-[10px] bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
                           {req.productionBatchNumber || 'General Overhead'}
                         </span>
@@ -389,16 +397,26 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
                       <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold border inline-block ${getStatusBadge(req.status)}`}>
                         {req.status}
                       </span>
-                      {req.rejectionReason && (
+                      {req.status === 'Cancelled' && (req.cancellationReason || req.rejectionReason) ? (
+                        <span
+                          className="block text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 max-w-[190px] mx-auto truncate"
+                          title={req.cancellationReason || req.rejectionReason}
+                        >
+                          {req.cancellationReason || req.rejectionReason}
+                        </span>
+                      ) : req.rejectionReason ? (
                         <span className="block text-[10px] text-rose-500 mt-0.5" title={req.rejectionReason}>
                           Reason: {req.rejectionReason.slice(0, 24)}...
                         </span>
-                      )}
+                      ) : null}
                     </td>
 
                     <td className="p-3 text-center">
                       <div className="flex items-center justify-center gap-1.5">
-                        {req.status !== 'Final Approved' && req.status !== 'Rejected' && canActOnRequestStep(req.status) && (
+                        {req.status !== 'Final Approved' &&
+                          req.status !== 'Rejected' &&
+                          req.status !== 'Cancelled' &&
+                          canActOnRequestStep(req.status) && (
                           <button
                             onClick={() => onOpenApprovalModal(req)}
                             title="Review & Advance Approval"
@@ -412,6 +430,7 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
                         {!req.isPayrollProcessed &&
                           req.status !== 'Final Approved' &&
                           req.status !== 'Rejected' &&
+                          req.status !== 'Cancelled' &&
                           canEditRequest && (
                             <button
                               onClick={() => onOpenEditRequest(req)}

@@ -1128,7 +1128,7 @@ export const OvertimeReportsTab: React.FC = () => {
 
   // Generate Report 6: Pending Approvals
   const generatePendingReport = () => {
-    return filteredRequests.filter(r => r.status !== 'Final Approved' && r.status !== 'Rejected').map(r => {
+    return filteredRequests.filter(r => r.status !== 'Final Approved' && r.status !== 'Rejected' && r.status !== 'Cancelled').map(r => {
       const baseRow: Record<string, any> = {
         'Request #': r.requestNumber,
         'Date': r.overtimeDate,

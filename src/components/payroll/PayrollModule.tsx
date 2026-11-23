@@ -2604,17 +2604,41 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                         const res = await bulkMarkAttendance(bulk);
                         setIsBulkSavingAttendance(false);
                         setDailyGridDrafts({});
+                        const otCounts = (res.overtimeSyncResults || []).reduce(
+                          (acc, item) => {
+                            if (item.action === 'CREATED') acc.created += 1;
+                            else if (item.action === 'UPDATED') acc.updated += 1;
+                            else if (item.action === 'CANCELLED') acc.cancelled += 1;
+                            else if (
+                              item.action === 'LOCKED_APPROVED' ||
+                              item.action === 'LOCKED_REJECTED' ||
+                              item.action === 'LOCKED_CANCELLED'
+                            ) {
+                              acc.locked += 1;
+                            }
+                            return acc;
+                          },
+                          { created: 0, updated: 0, cancelled: 0, locked: 0 }
+                        );
+                        const otParts: string[] = [];
+                        if (otCounts.created > 0) otParts.push(`${otCounts.created} created`);
+                        if (otCounts.updated > 0) otParts.push(`${otCounts.updated} updated`);
+                        if (otCounts.cancelled > 0) otParts.push(`${otCounts.cancelled} cancelled`);
+                        if (otCounts.locked > 0) otParts.push(`${otCounts.locked} locked unchanged`);
+                        const otNote =
+                          otParts.length > 0 ? ` Overtime Sync: ${otParts.join(', ')}.` : '';
                         if (res.dbSynced) {
                           setAttendanceFeedback({
                             type: 'success',
-                            message: `Marked ${bulk.length} employee(s) Present for ${selectedDateForAtt} and saved to Supabase.`,
+                            message: `Marked ${bulk.length} employee(s) Present for ${selectedDateForAtt} and saved to Supabase.${otNote}`,
                           });
                         } else {
                           setAttendanceFeedback({
                             type: 'warning',
                             message:
-                              res.error ||
-                              `Updated locally for ${selectedDateForAtt}, but Supabase did not persist to employee_attendances.`,
+                              (res.error ||
+                                `Updated locally for ${selectedDateForAtt}, but Supabase did not persist to employee_attendances.`) +
+                              otNote,
                             sqlFix: res.sqlFix || EMPLOYEE_ATTENDANCES_TABLE_SQL,
                           });
                         }
@@ -2886,17 +2910,32 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
                             return next;
                           });
 
+                          const otSync = res.overtimeSync;
+                          const otNote =
+                            otSync?.message &&
+                            [
+                              'CREATED',
+                              'UPDATED',
+                              'CANCELLED',
+                              'LOCKED_APPROVED',
+                              'LOCKED_REJECTED',
+                              'LOCKED_CANCELLED',
+                            ].includes(otSync.action)
+                              ? ` ${otSync.message}`
+                              : '';
+
                           if (res.dbSynced) {
                             setAttendanceFeedback({
                               type: 'success',
-                              message: `Saved ${emp.name} (${selectedDateForAtt}) Check In/Out to Supabase.`,
+                              message: `Saved ${emp.name} (${selectedDateForAtt}) Check In/Out to Supabase.${otNote}`,
                             });
                           } else {
                             setAttendanceFeedback({
                               type: 'warning',
                               message:
-                                res.error ||
-                                `Saved locally for ${emp.name}, but Supabase did not persist to employee_attendances.`,
+                                (res.error ||
+                                  `Saved locally for ${emp.name}, but Supabase did not persist to employee_attendances.`) +
+                                otNote,
                               sqlFix: res.sqlFix || EMPLOYEE_ATTENDANCES_TABLE_SQL,
                             });
                           }

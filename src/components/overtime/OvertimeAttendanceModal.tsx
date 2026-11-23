@@ -44,7 +44,7 @@ export const OvertimeAttendanceModal: React.FC<OvertimeAttendanceModalProps> = (
 
   const selectedRep = fieldForceReps.find(r => r.id === selectedEmpId);
   const employeeRequests = overtimeRequests.filter(
-    r => r.employeeId === selectedEmpId && r.status !== 'Rejected'
+    r => r.employeeId === selectedEmpId && r.status !== 'Rejected' && r.status !== 'Cancelled'
   );
   const linkedRequest = employeeRequests.find(r => r.id === selectedRequestId);
 

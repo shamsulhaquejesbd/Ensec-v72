@@ -2,8 +2,14 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Ensec ERP - QR Attendance Automated Overtime Request Engine
+ * Ensec ERP - Unified Attendance <-> Overtime Requisition Synchronization Engine
  * Shared between Express backend (server.ts) and React frontend (ERPContext.tsx).
+ *
+ * Supports:
+ * - QR Code Attendance Scans (IN / OUT / OUT_UPDATE)
+ * - Manual Attendance Daily Grid Create / Update (Today & Historical Dates)
+ * - Bulk Attendance Marking
+ * - GPS Check-Out
  */
 
 import {
@@ -16,12 +22,15 @@ import {
 import {
   EmployeeOvertimePolicy,
   OvertimeRequest,
-  OvertimeStatus,
   calculateEmployeeIndividualOvertime,
 } from '../types/overtime.ts';
 import type { AttendanceRecord } from '../types/payroll.ts';
 
 export const MINIMUM_AUTO_OVERTIME_MINUTES = 60;
+export const DEFAULT_ATTENDANCE_CANCEL_REASON =
+  'Attendance OUT Time Updated – No Overtime';
+
+export type AttendanceOvertimeSourceMode = 'QR' | 'MANUAL' | 'GPS';
 
 export interface QrOvertimeEligibility {
   otStartTime24: string;
@@ -39,18 +48,30 @@ function parseFlexibleTimeMinutes(raw?: string | null): number | null {
   return parseTimeToMinutes(normalized);
 }
 
+function isNonWorkingAttendanceStatus(status?: string | null): boolean {
+  const s = String(status || '').trim().toLowerCase();
+  return (
+    s === 'absent' ||
+    s === 'leave' ||
+    s === 'paid leave' ||
+    s === 'unpaid leave'
+  );
+}
+
 /**
- * Calculates automated overtime eligibility from QR attendance IN/OUT and
+ * Calculates automated overtime eligibility from Attendance IN/OUT and
  * Payroll & HR Settings Default Shift Start/End Times.
  *
  * Rules:
  * - Overtime starts immediately after configured Default Shift End Time.
  * - Overtime ends at actual attendance OUT time (with overnight rollover support).
  * - Minimum qualifying overtime = 60 minutes (1 hour).
+ * - Absent / Leave or missing OUT time results in 0 overtime.
  */
 export function calculateQrOvertimeEligibility(params: {
   checkInTime?: string | null;
   checkOutTime?: string | null;
+  attendanceStatus?: string | null;
   defaultShiftEndTime?: string | null;
   defaultShiftStartTime?: string | null;
   minimumOvertimeMinutes?: number;
@@ -69,10 +90,20 @@ export function calculateQrOvertimeEligibility(params: {
     parseFlexibleTimeMinutes(DEFAULT_SHIFT_START_TIME) ??
     9 * 60;
 
+  const shiftEndCanonical = formatMinutesAsHHmm(shiftEndMinsRaw);
+
+  if (isNonWorkingAttendanceStatus(params.attendanceStatus)) {
+    return {
+      otStartTime24: shiftEndCanonical,
+      otEndTime24: '',
+      overtimeMinutes: 0,
+      overtimeHours: 0,
+      qualifiesForAutoRequest: false,
+    };
+  }
+
   const checkInMins = parseFlexibleTimeMinutes(params.checkInTime);
   const checkOutMinsRaw = parseFlexibleTimeMinutes(params.checkOutTime);
-
-  const shiftEndCanonical = formatMinutesAsHHmm(shiftEndMinsRaw);
 
   if (checkOutMinsRaw === null) {
     return {
@@ -143,8 +174,36 @@ export function isOvertimeRequestRejectedStatus(status?: string | null): boolean
   return String(status || '').trim() === 'Rejected';
 }
 
+export function isOvertimeRequestCancelledStatus(status?: string | null): boolean {
+  return String(status || '').trim() === 'Cancelled';
+}
+
 const normCode = (val?: string | null): string => String(val || '').trim().toLowerCase();
 
+function matchesEmployeeAndDate(
+  req: OvertimeRequest,
+  employeeId?: string | null,
+  employeeCode?: string | null,
+  targetDate?: string | null
+): boolean {
+  if (!req || !targetDate) return false;
+  if (String(req.overtimeDate || '').trim().slice(0, 10) !== targetDate) return false;
+
+  const targetEmpId = normCode(employeeId);
+  const targetEmpCode = normCode(employeeCode);
+  const rEmpId = normCode(req.employeeId);
+  const rEmpCode = normCode(req.employeeCode);
+
+  if (targetEmpId && rEmpId && rEmpId === targetEmpId) return true;
+  if (targetEmpCode && rEmpCode && rEmpCode === targetEmpCode) return true;
+  if (targetEmpId && rEmpCode && rEmpCode === targetEmpId) return true;
+  if (targetEmpCode && rEmpId && rEmpId === targetEmpCode) return true;
+  return false;
+}
+
+/**
+ * Finds an active (non-Cancelled) overtime requisition for the same employee and date.
+ */
 export function findDuplicateOvertimeRequest(
   requests: OvertimeRequest[],
   employeeId?: string | null,
@@ -154,24 +213,34 @@ export function findDuplicateOvertimeRequest(
 ): OvertimeRequest | undefined {
   const targetDate = String(overtimeDate || '').trim().slice(0, 10);
   if (!targetDate) return undefined;
-  const targetEmpId = normCode(employeeId);
-  const targetEmpCode = normCode(employeeCode);
 
   return requests.find((req) => {
     if (!req) return false;
     if (excludeRequestId && req.id === excludeRequestId) return false;
-    if (String(req.status || '').trim() === 'Cancelled') return false;
-    if (String(req.overtimeDate || '').trim().slice(0, 10) !== targetDate) return false;
-
-    const rEmpId = normCode(req.employeeId);
-    const rEmpCode = normCode(req.employeeCode);
-
-    if (targetEmpId && rEmpId && rEmpId === targetEmpId) return true;
-    if (targetEmpCode && rEmpCode && rEmpCode === targetEmpCode) return true;
-    if (targetEmpId && rEmpCode && rEmpCode === targetEmpId) return true;
-    if (targetEmpCode && rEmpId && rEmpId === targetEmpCode) return true;
-    return false;
+    if (isOvertimeRequestCancelledStatus(req.status)) return false;
+    return matchesEmployeeAndDate(req, employeeId, employeeCode, targetDate);
   });
+}
+
+/**
+ * Finds the latest Cancelled overtime requisition for the same employee and date
+ * so automatic Attendance edits never auto-reactivate a cancelled requisition.
+ */
+export function findCancelledOvertimeRequest(
+  requests: OvertimeRequest[],
+  employeeId?: string | null,
+  employeeCode?: string | null,
+  overtimeDate?: string | null
+): OvertimeRequest | undefined {
+  const targetDate = String(overtimeDate || '').trim().slice(0, 10);
+  if (!targetDate) return undefined;
+
+  return requests.find(
+    (req) =>
+      Boolean(req) &&
+      isOvertimeRequestCancelledStatus(req.status) &&
+      matchesEmployeeAndDate(req, employeeId, employeeCode, targetDate)
+  );
 }
 
 export function generateNextOvertimeRequestNumber(
@@ -190,8 +259,10 @@ export function generateNextOvertimeRequestNumber(
 export type QrOvertimeSyncAction =
   | 'CREATED'
   | 'UPDATED'
+  | 'CANCELLED'
   | 'LOCKED_APPROVED'
   | 'LOCKED_REJECTED'
+  | 'LOCKED_CANCELLED'
   | 'BELOW_THRESHOLD_NO_REQUEST'
   | 'BELOW_THRESHOLD_EXISTING_UNCHANGED';
 
@@ -199,10 +270,13 @@ export interface QrOvertimeSyncResult {
   action: QrOvertimeSyncAction;
   eligibility: QrOvertimeEligibility;
   request?: OvertimeRequest;
+  previousStatus?: string;
+  previousHours?: number;
   message: string;
+  auditDetails?: string;
 }
 
-export function reconcileQrOvertimeRequest(params: {
+export interface ReconcileAttendanceOvertimeParams {
   existingRequests: OvertimeRequest[];
   attendanceRecord: AttendanceRecord;
   employee: {
@@ -220,7 +294,13 @@ export function reconcileQrOvertimeRequest(params: {
   defaultShiftEndTime?: string | null;
   defaultShiftStartTime?: string | null;
   nowIso?: string;
-}): QrOvertimeSyncResult {
+  sourceMode?: AttendanceOvertimeSourceMode;
+  actorName?: string;
+}
+
+export function reconcileAttendanceOvertimeRequest(
+  params: ReconcileAttendanceOvertimeParams
+): QrOvertimeSyncResult {
   const {
     existingRequests,
     attendanceRecord,
@@ -231,6 +311,8 @@ export function reconcileQrOvertimeRequest(params: {
     defaultShiftEndTime,
     defaultShiftStartTime,
     nowIso = new Date().toISOString(),
+    sourceMode = 'MANUAL',
+    actorName = 'Attendance Synchronization',
   } = params;
 
   const checkInTime = attendanceRecord.inTime || attendanceRecord.checkInTime || '';
@@ -240,53 +322,109 @@ export function reconcileQrOvertimeRequest(params: {
   const eligibility = calculateQrOvertimeEligibility({
     checkInTime,
     checkOutTime,
+    attendanceStatus: attendanceRecord.status,
     defaultShiftEndTime,
     defaultShiftStartTime,
     minimumOvertimeMinutes: MINIMUM_AUTO_OVERTIME_MINUTES,
   });
 
-  const existing = findDuplicateOvertimeRequest(
+  if (!attendanceDate) {
+    return {
+      action: 'BELOW_THRESHOLD_NO_REQUEST',
+      eligibility,
+      message: 'Attendance date missing; skipped overtime synchronization.',
+    };
+  }
+
+  const existingActive = findDuplicateOvertimeRequest(
     existingRequests,
     employee.id,
     employee.code,
     attendanceDate
   );
+  const existingCancelled = !existingActive
+    ? findCancelledOvertimeRequest(
+        existingRequests,
+        employee.id,
+        employee.code,
+        attendanceDate
+      )
+    : undefined;
 
-  if (existing) {
-    if (isOvertimeRequestApprovedStatus(existing.status)) {
+  const inLabel = formatTime12Hour(checkInTime) || checkInTime || '—';
+  const outLabel =
+    formatTime12Hour(eligibility.otEndTime24 || checkOutTime) ||
+    eligibility.otEndTime24 ||
+    checkOutTime ||
+    '—';
+  const shiftEndLabel = formatTime12Hour(eligibility.otStartTime24) || eligibility.otStartTime24;
+
+  // 1. Existing active (non-Cancelled) requisition found for (employee, attendanceDate)
+  if (existingActive) {
+    if (isOvertimeRequestApprovedStatus(existingActive.status)) {
       return {
         action: 'LOCKED_APPROVED',
         eligibility,
-        request: existing,
-        message: `Overtime request ${existing.requestNumber} is already ${existing.status} and locked from automatic updates.`,
+        request: existingActive,
+        previousStatus: existingActive.status,
+        previousHours: existingActive.expectedHours,
+        message: `Overtime request ${existingActive.requestNumber} is already ${existingActive.status} and locked from automatic updates.`,
+        auditDetails: `Attendance updated on ${attendanceDate} (IN: ${inLabel}, OUT: ${outLabel}, Calculated OT: ${eligibility.overtimeHours}h), but ${existingActive.requestNumber} remains ${existingActive.status} (${existingActive.expectedHours}h) per approval protection.`,
       };
     }
 
-    if (isOvertimeRequestRejectedStatus(existing.status)) {
+    if (isOvertimeRequestRejectedStatus(existingActive.status)) {
       return {
         action: 'LOCKED_REJECTED',
         eligibility,
-        request: existing,
-        message: `Overtime request ${existing.requestNumber} is already Rejected and locked from automatic updates.`,
+        request: existingActive,
+        previousStatus: existingActive.status,
+        previousHours: existingActive.expectedHours,
+        message: `Overtime request ${existingActive.requestNumber} is already Rejected and locked from automatic updates.`,
+        auditDetails: `Attendance updated on ${attendanceDate} (IN: ${inLabel}, OUT: ${outLabel}, Calculated OT: ${eligibility.overtimeHours}h), but ${existingActive.requestNumber} remains Rejected per approval protection.`,
       };
     }
 
-    if (!eligibility.qualifiesForAutoRequest) {
-      return {
-        action: 'BELOW_THRESHOLD_EXISTING_UNCHANGED',
-        eligibility,
-        request: existing,
-        message: `Overtime duration (${eligibility.overtimeMinutes} mins) is under 1 hour; existing request ${existing.requestNumber} unchanged.`,
-      };
-    }
+    if (isOvertimeRequestPendingForAutoUpdate(existingActive.status)) {
+      // Scenario D: Overtime completely removed or fell below 1-hour minimum -> Cancel Pending Requisition
+      if (!eligibility.qualifiesForAutoRequest) {
+        const cancelReason =
+          eligibility.overtimeMinutes <= 0
+            ? DEFAULT_ATTENDANCE_CANCEL_REASON
+            : `${DEFAULT_ATTENDANCE_CANCEL_REASON} (${eligibility.overtimeMinutes} mins under 60-min minimum)`;
 
-    if (isOvertimeRequestPendingForAutoUpdate(existing.status)) {
-      const basic = Number(salaryBasicBDT ?? existing.basicSalaryBDT ?? employee.basicSalaryBDT ?? 25000);
+        const cancelled: OvertimeRequest = {
+          ...existingActive,
+          status: 'Cancelled',
+          attendanceId: attendanceRecord.id || existingActive.attendanceId,
+          actualOvertimeHours: 0,
+          cancellationReason: cancelReason,
+          cancelledBy: actorName,
+          cancelledAt: nowIso,
+          rejectionReason: cancelReason,
+          updatedAt: nowIso,
+        };
+
+        return {
+          action: 'CANCELLED',
+          eligibility,
+          request: cancelled,
+          previousStatus: existingActive.status,
+          previousHours: existingActive.expectedHours,
+          message: `Cancelled Pending Overtime Request ${existingActive.requestNumber}: ${cancelReason}.`,
+          auditDetails: `Cancelled ${existingActive.requestNumber} for ${employee.name} (${attendanceDate}) after Attendance update (OUT: ${outLabel}, Shift End: ${shiftEndLabel}, OT: ${eligibility.overtimeMinutes} mins). Reason: ${cancelReason}`,
+        };
+      }
+
+      // Scenario B & C: Pending Overtime Duration Increased or Reduced (>= 60 mins)
+      const basic = Number(
+        salaryBasicBDT ?? existingActive.basicSalaryBDT ?? employee.basicSalaryBDT ?? 25000
+      );
       const effectivePolicy: Partial<EmployeeOvertimePolicy> = policy || {
         isEligible: true,
         calculationBasis: 'Basic Salary',
         standardMonthlyWorkingHours: 208,
-        overtimeMultiplier: existing.overtimeMultiplier ?? 2.0,
+        overtimeMultiplier: existingActive.overtimeMultiplier ?? 2.0,
         status: 'Active',
       };
       const costCalc = calculateEmployeeIndividualOvertime(
@@ -295,24 +433,28 @@ export function reconcileQrOvertimeRequest(params: {
         eligibility.overtimeHours
       );
 
-      const outLabel = formatTime12Hour(eligibility.otEndTime24) || eligibility.otEndTime24;
-      const inLabel = formatTime12Hour(checkInTime) || checkInTime;
+      const sourcePrefix =
+        sourceMode === 'QR' || existingActive.sourceType === 'QR_ATTENDANCE_AUTO'
+          ? 'Auto-updated from QR Attendance'
+          : 'Auto-updated from Attendance';
 
       const updated: OvertimeRequest = {
-        ...existing,
+        ...existingActive,
         // Keep ID, requestNumber, status, approval hierarchy, and projectPurpose untouched
+        expectedStartTime: eligibility.otStartTime24,
         expectedEndTime: eligibility.otEndTime24,
         expectedHours: eligibility.overtimeHours,
         actualOvertimeHours: eligibility.overtimeHours,
-        attendanceId: attendanceRecord.id || existing.attendanceId,
+        attendanceId: attendanceRecord.id || existingActive.attendanceId,
         basicSalaryBDT: basic,
         hourlyRateBDT: costCalc.hourlyRate,
         overtimeMultiplier: costCalc.multiplier,
         calculatedOvertimeAmountBDT: costCalc.totalAmountBDT,
         overtimeReason:
-          existing.sourceType === 'QR_ATTENDANCE_AUTO'
-            ? `Auto-generated from QR Attendance (IN: ${inLabel || '—'}, OUT updated: ${outLabel})`
-            : existing.overtimeReason,
+          existingActive.sourceType === 'QR_ATTENDANCE_AUTO' ||
+          existingActive.sourceType === 'ATTENDANCE_AUTO'
+            ? `${sourcePrefix} (IN: ${inLabel}, Shift End: ${shiftEndLabel}, OUT: ${outLabel})`
+            : existingActive.overtimeReason,
         updatedAt: nowIso,
       };
 
@@ -320,11 +462,28 @@ export function reconcileQrOvertimeRequest(params: {
         action: 'UPDATED',
         eligibility,
         request: updated,
-        message: `Updated pending Overtime Request ${existing.requestNumber} to ${eligibility.overtimeHours}h (OUT ${outLabel}).`,
+        previousStatus: existingActive.status,
+        previousHours: existingActive.expectedHours,
+        message: `Updated pending Overtime Request ${existingActive.requestNumber} to ${eligibility.overtimeHours}h (${shiftEndLabel} – ${outLabel}).`,
+        auditDetails: `Updated ${existingActive.requestNumber} for ${employee.name} (${attendanceDate}) from ${existingActive.expectedHours}h to ${eligibility.overtimeHours}h (OUT: ${outLabel}, Cost: ${costCalc.totalAmountBDT}).`,
       };
     }
   }
 
+  // 2. Cancelled requisition protection: Do not automatically reactivate or replace Cancelled requisitions
+  if (existingCancelled) {
+    return {
+      action: 'LOCKED_CANCELLED',
+      eligibility,
+      request: existingCancelled,
+      previousStatus: existingCancelled.status,
+      previousHours: existingCancelled.expectedHours,
+      message: `Overtime request ${existingCancelled.requestNumber} is Cancelled and will not be automatically reactivated.`,
+      auditDetails: `Attendance updated on ${attendanceDate} (IN: ${inLabel}, OUT: ${outLabel}, Calculated OT: ${eligibility.overtimeHours}h), while ${existingCancelled.requestNumber} remains Cancelled (manual new requisition required to re-open overtime).`,
+    };
+  }
+
+  // 3. No existing requisition and below 1-hour threshold -> Do not generate
   if (!eligibility.qualifiesForAutoRequest) {
     return {
       action: 'BELOW_THRESHOLD_NO_REQUEST',
@@ -336,6 +495,7 @@ export function reconcileQrOvertimeRequest(params: {
     };
   }
 
+  // 4. Scenario A: Create new Pending Overtime Requisition for (employee, attendanceDate)
   const basic = Number(salaryBasicBDT ?? employee.basicSalaryBDT ?? 25000);
   const gross = Number(salaryGrossBDT ?? (basic > 0 ? Math.round(basic * 1.6) : 40000));
   const costCalc = calculateEmployeeIndividualOvertime(
@@ -346,12 +506,21 @@ export function reconcileQrOvertimeRequest(params: {
 
   const year = Number(attendanceDate.slice(0, 4)) || new Date().getFullYear();
   const reqNumber = generateNextOvertimeRequestNumber(existingRequests, year);
-  const sanitizedEmpId = String(employee.id || employee.code || 'emp').replace(/[^a-zA-Z0-9_-]/g, '');
-  const reqId = `otr-qr-${sanitizedEmpId}-${attendanceDate}`;
+  const sanitizedEmpId = String(employee.id || employee.code || 'emp').replace(
+    /[^a-zA-Z0-9_-]/g,
+    ''
+  );
+  const idPrefix = sourceMode === 'QR' ? 'otr-qr' : 'otr-att';
+  const reqId = `${idPrefix}-${sanitizedEmpId}-${attendanceDate}`;
 
-  const inLabel = formatTime12Hour(checkInTime) || checkInTime || '—';
-  const outLabel = formatTime12Hour(eligibility.otEndTime24) || eligibility.otEndTime24;
-  const shiftEndLabel = formatTime12Hour(eligibility.otStartTime24) || eligibility.otStartTime24;
+  const sourceType: OvertimeRequest['sourceType'] =
+    sourceMode === 'QR' ? 'QR_ATTENDANCE_AUTO' : 'ATTENDANCE_AUTO';
+  const requestedByLabel =
+    sourceMode === 'QR'
+      ? 'QR Attendance Automation'
+      : sourceMode === 'GPS'
+      ? 'GPS Attendance Automation'
+      : 'Attendance Synchronization';
 
   const created: OvertimeRequest = {
     id: reqId,
@@ -365,13 +534,15 @@ export function reconcileQrOvertimeRequest(params: {
     overtimeDate: attendanceDate,
     purposeCategory: 'General Operations',
     projectPurpose: '', // Must remain blank initially so authorized approver selects purpose
-    sourceType: 'QR_ATTENDANCE_AUTO',
+    sourceType,
     expectedStartTime: eligibility.otStartTime24,
     expectedEndTime: eligibility.otEndTime24,
     expectedHours: eligibility.overtimeHours,
     actualOvertimeHours: eligibility.overtimeHours,
-    overtimeReason: `Auto-generated from QR Attendance (IN: ${inLabel}, Shift End: ${shiftEndLabel}, OUT: ${outLabel})`,
-    requestedBy: 'QR Attendance Automation',
+    overtimeReason: `Auto-generated from ${
+      sourceMode === 'QR' ? 'QR' : sourceMode === 'GPS' ? 'GPS' : 'Manual'
+    } Attendance (IN: ${inLabel}, Shift End: ${shiftEndLabel}, OUT: ${outLabel})`,
+    requestedBy: requestedByLabel,
     requestedAt: nowIso,
     status: 'Pending Supervisor',
     attendanceId: attendanceRecord.id,
@@ -391,6 +562,19 @@ export function reconcileQrOvertimeRequest(params: {
     action: 'CREATED',
     eligibility,
     request: created,
-    message: `Auto-generated Overtime Request ${reqNumber} (${eligibility.overtimeHours}h OT from ${shiftEndLabel} to ${outLabel}).`,
+    message: `Auto-generated Overtime Request ${reqNumber} (${eligibility.overtimeHours}h OT on ${attendanceDate} from ${shiftEndLabel} to ${outLabel}).`,
+    auditDetails: `Auto-generated ${reqNumber} for ${employee.name} (${attendanceDate}): ${eligibility.overtimeHours}h OT (${shiftEndLabel} – ${outLabel}) via ${sourceMode} Attendance.`,
   };
+}
+
+/**
+ * Backward-compatible wrapper used by QR Attendance flow.
+ */
+export function reconcileQrOvertimeRequest(
+  params: Omit<ReconcileAttendanceOvertimeParams, 'sourceMode'>
+): QrOvertimeSyncResult {
+  return reconcileAttendanceOvertimeRequest({
+    ...params,
+    sourceMode: 'QR',
+  });
 }
