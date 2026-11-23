@@ -436,15 +436,9 @@ export const OvertimeRequisitionTab: React.FC = () => {
             <h2 className="text-base font-bold text-slate-900 dark:text-white tracking-tight">
               Overtime Requisition &amp; Head Office Approval
             </h2>
-            {canApproveRequisition && (
-              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-800">
-                Head Office Approval Enabled
-              </span>
-            )}
+            
           </div>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">
-            Factory submits worker &amp; hour requirements for an overtime date; Head Office grants authorization prior to execution.
-          </p>
+          
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
@@ -535,11 +529,7 @@ export const OvertimeRequisitionTab: React.FC = () => {
                   </>
                 )}
               </h3>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                {editingRequisition
-                  ? `Head Office correction remarks: "${editingRequisition.approvalRemarks || 'Review and update details'}"`
-                  : 'Submit worker capacity & hours needed for a specific date. Head Office must approve before overtime is granted.'}
-              </p>
+              
             </div>
             {editingRequisition && (
               <button
@@ -661,9 +651,7 @@ export const OvertimeRequisitionTab: React.FC = () => {
                   <Tag className="w-3.5 h-3.5 text-indigo-600" />
                   <span>Overtime Purpose (Multi-Select from Payroll Settings or Manual Entry) *</span>
                 </label>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                  Loaded directly from Payroll Settings → Overtime Purpose. Manual custom entries only apply to this requisition.
-                </p>
+                
               </div>
               <span className="font-mono text-[11px] font-bold text-indigo-700 dark:text-indigo-300 tabular-nums shrink-0">
                 {selectedPurposes.length} Selected
