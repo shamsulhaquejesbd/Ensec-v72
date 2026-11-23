@@ -3937,3 +3937,93 @@ INSERT INTO public.system_settings (id, software_name, branding_json)
 VALUES ('default', 'Ensec', '{"softwareName":"Ensec","logoDataUrl":null}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
+-- ============================================================================
+-- 46. OVERTIME REQUISITION MODULE & HEAD OFFICE APPROVAL WORKFLOW
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.overtime_requisitions (
+  id TEXT PRIMARY KEY,
+  requisition_number TEXT UNIQUE NOT NULL,
+  requisition_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  overtime_date DATE NOT NULL,
+  required_workers INTEGER NOT NULL CHECK (required_workers > 0),
+  requested_hours NUMERIC(5, 2) NOT NULL CHECK (requested_hours > 0 AND requested_hours <= 24),
+  purpose TEXT NOT NULL DEFAULT '',
+  purposes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  remarks TEXT,
+  requested_by_id TEXT NOT NULL,
+  requested_by_name TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  requested_by_role TEXT,
+  requested_by_department TEXT,
+  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status TEXT NOT NULL DEFAULT 'Pending Approval'
+    CHECK (status IN ('Pending Approval', 'Approved', 'Rejected', 'Returned for Correction')),
+  overtime_granted BOOLEAN NOT NULL DEFAULT FALSE,
+  granted_at TIMESTAMPTZ,
+  approved_by_id TEXT,
+  approved_by_name TEXT,
+  approved_by TEXT,
+  approved_at TIMESTAMPTZ,
+  approval_remarks TEXT,
+  returned_count INTEGER NOT NULL DEFAULT 0,
+  last_resubmitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.overtime_requisition_purposes (
+  id TEXT PRIMARY KEY,
+  requisition_id TEXT NOT NULL REFERENCES public.overtime_requisitions(id) ON DELETE CASCADE,
+  payroll_purpose_id TEXT,
+  purpose_name TEXT NOT NULL CHECK (length(btrim(purpose_name)) > 0),
+  is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.overtime_requisition_approval_history (
+  id TEXT PRIMARY KEY,
+  requisition_id TEXT NOT NULL REFERENCES public.overtime_requisitions(id) ON DELETE CASCADE,
+  action TEXT NOT NULL
+    CHECK (action IN ('SUBMITTED', 'RESUBMITTED', 'APPROVED', 'REJECTED', 'RETURNED_FOR_CORRECTION', 'UPDATED')),
+  actor_id TEXT,
+  actor_name TEXT NOT NULL,
+  actor_role TEXT,
+  remarks TEXT,
+  previous_status TEXT,
+  new_status TEXT NOT NULL,
+  action_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.overtime_requests
+  ADD COLUMN IF NOT EXISTS requisition_id TEXT REFERENCES public.overtime_requisitions(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS requisition_number TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_ot_requisitions_status ON public.overtime_requisitions(status);
+CREATE INDEX IF NOT EXISTS idx_ot_requisitions_overtime_date ON public.overtime_requisitions(overtime_date DESC);
+CREATE INDEX IF NOT EXISTS idx_ot_requisitions_req_date ON public.overtime_requisitions(requisition_date DESC);
+CREATE INDEX IF NOT EXISTS idx_ot_requisitions_requested_by_id ON public.overtime_requisitions(requested_by_id);
+CREATE INDEX IF NOT EXISTS idx_ot_requisitions_granted ON public.overtime_requisitions(overtime_granted) WHERE overtime_granted = TRUE;
+CREATE INDEX IF NOT EXISTS idx_ot_req_purposes_requisition_id ON public.overtime_requisition_purposes(requisition_id);
+CREATE INDEX IF NOT EXISTS idx_ot_req_history_requisition_id ON public.overtime_requisition_approval_history(requisition_id, action_at DESC);
+CREATE INDEX IF NOT EXISTS idx_overtime_requests_requisition_id ON public.overtime_requests(requisition_id);
+
+ALTER TABLE public.overtime_requisitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.overtime_requisition_purposes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.overtime_requisition_approval_history ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public all overtime_requisitions" ON public.overtime_requisitions;
+CREATE POLICY "Allow public all overtime_requisitions" ON public.overtime_requisitions FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow public all overtime_requisition_purposes" ON public.overtime_requisition_purposes;
+CREATE POLICY "Allow public all overtime_requisition_purposes" ON public.overtime_requisition_purposes FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow public read insert overtime_requisition_approval_history" ON public.overtime_requisition_approval_history;
+CREATE POLICY "Allow public read insert overtime_requisition_approval_history" ON public.overtime_requisition_approval_history FOR ALL USING (true) WITH CHECK (true);
+
+GRANT ALL ON public.overtime_requisitions TO postgres, anon, authenticated, service_role;
+GRANT ALL ON public.overtime_requisition_purposes TO postgres, anon, authenticated, service_role;
+GRANT SELECT, INSERT ON public.overtime_requisition_approval_history TO postgres, anon, authenticated, service_role;
+GRANT ALL ON public.overtime_requisition_approval_history TO postgres, service_role;
+REVOKE UPDATE, DELETE ON public.overtime_requisition_approval_history FROM anon;
+
+

@@ -402,6 +402,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           children: [
             { id: 'overtime-dashboard', label: 'Overtime Dashboard', icon: LayoutDashboard },
             { id: 'overtime-requests', label: 'Overtime Requests', icon: FileText },
+            { id: 'overtime-requisition', label: 'Overtime Requisition', icon: ClipboardList },
             { id: 'overtime-attendance', label: 'Overtime Attendance', icon: Clock },
             { id: 'overtime-batch-allocation', label: 'Batch Allocation & Split', icon: Layers },
             { id: 'overtime-sync', label: 'Payroll & Costing Dual-Sync', icon: ArrowRightLeft },

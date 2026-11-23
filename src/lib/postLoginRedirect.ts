@@ -131,6 +131,7 @@ export const SIDEBAR_ORDERED_MODULES: readonly string[] = [
   'payroll',
   'overtime-dashboard',
   'overtime-requests',
+  'overtime-requisition',
   'overtime-attendance',
   'overtime-batch-allocation',
   'overtime-sync',

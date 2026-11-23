@@ -24,7 +24,23 @@ import type {
   PayrollSettings,
   RejectedAttendanceAttempt,
 } from './src/types/payroll.ts';
-import type { EmployeeOvertimePolicy, OvertimeRequest } from './src/types/overtime.ts';
+import type {
+  EmployeeOvertimePolicy,
+  OvertimeRequest,
+  OvertimeRequisition,
+  OvertimeRequisitionApprovalHistoryEntry,
+  OvertimeRequisitionPurposeItem,
+} from './src/types/overtime.ts';
+import {
+  applyRequisitionDecision,
+  applyRequisitionResubmission,
+  buildCreatedRequisition,
+  canUserApproveRequisition,
+  doesActorMatchRequester,
+  normalizeRequisitionPurposes,
+  validateOvertimeRequisitionPayload,
+  type RequisitionDecisionAction,
+} from './src/lib/overtimeRequisitionEngine.ts';
 import {
   findCancelledOvertimeRequest,
   findDuplicateOvertimeRequest,
@@ -1427,8 +1443,29 @@ export function createAppServer() {
   const mfgRawMaterialsCache = new Map<string, any>();
   const mfgBatchesCache = new Map<string, any>();
   const overtimeRequestsCache = new Map<string, any>();
+  const overtimeRequisitionsCache = new Map<string, OvertimeRequisition>();
+  const overtimeRequisitionLocks = new Map<string, Promise<void>>();
   const overtimeAttendancesCache = new Map<string, any>();
   const overtimePoliciesCache = new Map<string, any>();
+
+  const withRequisitionLock = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = overtimeRequisitionLocks.get(id) || Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = prev.then(() => next);
+    overtimeRequisitionLocks.set(id, chained);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (overtimeRequisitionLocks.get(id) === chained) {
+        overtimeRequisitionLocks.delete(id);
+      }
+    }
+  };
 
   const snapshotOtForEmployeeDate = async (
     employeeId: string,
@@ -3223,6 +3260,8 @@ export function createAppServer() {
             productName: r.product_name || undefined,
             projectPurpose: r.project_purpose || '',
             sourceType: r.source_type || 'MANUAL',
+            requisitionId: r.requisition_id || undefined,
+            requisitionNumber: r.requisition_number || undefined,
             purposeId: r.purpose_id || undefined,
             purposeSelectedBy: r.purpose_selected_by || undefined,
             purposeSelectedAt: r.purpose_selected_at || undefined,
@@ -3348,6 +3387,524 @@ export function createAppServer() {
     const id = String(req.params.id || '');
     const existing = overtimeRequestsCache.get(id) || { id };
     return res.status(200).json({ allowed: true, request: sanitizeOvertimeRecordForUser(existing, caller) });
+  });
+
+  // ============================================================================
+  // OVERTIME REQUISITION MODULE APIs (Factory Submission + Head Office Approval)
+  // ============================================================================
+  const loadAuthoritativeOvertimeRequisitions = async (): Promise<OvertimeRequisition[]> => {
+    const mergedMap = new Map<string, OvertimeRequisition>(overtimeRequisitionsCache);
+    if (serverSupabase) {
+      try {
+        const [{ data: reqRows, error: reqErr }, { data: purposeRows }, { data: histRows }] =
+          await Promise.all([
+            serverSupabase
+              .from('overtime_requisitions')
+              .select('*')
+              .order('submitted_at', { ascending: false }),
+            serverSupabase
+              .from('overtime_requisition_purposes')
+              .select('*')
+              .order('created_at', { ascending: true }),
+            serverSupabase
+              .from('overtime_requisition_approval_history')
+              .select('*')
+              .order('action_at', { ascending: false }),
+          ]);
+
+        if (!reqErr && Array.isArray(reqRows)) {
+          const purposesByReq = new Map<string, OvertimeRequisitionPurposeItem[]>();
+          if (Array.isArray(purposeRows)) {
+            for (const p of purposeRows) {
+              const reqId = String(p.requisition_id || '');
+              const arr = purposesByReq.get(reqId) || [];
+              arr.push({
+                id: String(p.id),
+                requisitionId: reqId,
+                payrollPurposeId: p.payroll_purpose_id ? String(p.payroll_purpose_id) : undefined,
+                purposeName: String(p.purpose_name || ''),
+                isCustom: Boolean(p.is_custom),
+                createdAt: p.created_at || undefined,
+              });
+              purposesByReq.set(reqId, arr);
+            }
+          }
+
+          const historyByReq = new Map<string, OvertimeRequisitionApprovalHistoryEntry[]>();
+          if (Array.isArray(histRows)) {
+            for (const h of histRows) {
+              const reqId = String(h.requisition_id || '');
+              const arr = historyByReq.get(reqId) || [];
+              arr.push({
+                id: String(h.id),
+                requisitionId: reqId,
+                action: (h.action || 'SUBMITTED') as OvertimeRequisitionApprovalHistoryEntry['action'],
+                actorId: h.actor_id ? String(h.actor_id) : undefined,
+                actorName: String(h.actor_name || 'System'),
+                actorRole: h.actor_role ? String(h.actor_role) : undefined,
+                remarks: h.remarks ? String(h.remarks) : undefined,
+                previousStatus: h.previous_status || undefined,
+                newStatus: (h.new_status || 'Pending Approval') as OvertimeRequisition['status'],
+                actionAt: h.action_at || new Date().toISOString(),
+              });
+              historyByReq.set(reqId, arr);
+            }
+          }
+
+          for (const r of reqRows) {
+            const id = String(r.id);
+            const fallbackPurposes = Array.isArray(r.purposes_json)
+              ? normalizeRequisitionPurposes(r.purposes_json, id)
+              : [];
+            const purposes = purposesByReq.get(id) || fallbackPurposes;
+            const mapped: OvertimeRequisition = {
+              id,
+              requisitionNumber: String(r.requisition_number || id),
+              requisitionDate: String(r.requisition_date || '').slice(0, 10),
+              overtimeDate: String(r.overtime_date || '').slice(0, 10),
+              requiredWorkers: Number(r.required_workers) || 0,
+              requestedHours: Number(r.requested_hours) || 0,
+              purpose:
+                String(r.purpose || '').trim() ||
+                purposes.map((p) => p.purposeName).join(', '),
+              purposes,
+              remarks: r.remarks || undefined,
+              requestedById: String(r.requested_by_id || ''),
+              requestedByName: String(r.requested_by_name || r.requested_by || ''),
+              requestedBy: String(r.requested_by || r.requested_by_name || ''),
+              requestedByRole: r.requested_by_role || undefined,
+              requestedByDepartment: r.requested_by_department || undefined,
+              submittedAt: r.submitted_at || r.created_at || new Date().toISOString(),
+              status: (r.status || 'Pending Approval') as OvertimeRequisition['status'],
+              overtimeGranted: Boolean(r.overtime_granted),
+              grantedAt: r.granted_at || undefined,
+              approvedById: r.approved_by_id || undefined,
+              approvedByName: r.approved_by_name || undefined,
+              approvedBy: r.approved_by || r.approved_by_name || undefined,
+              approvedAt: r.approved_at || undefined,
+              approvalRemarks: r.approval_remarks || undefined,
+              returnedCount: Number(r.returned_count) || 0,
+              lastResubmittedAt: r.last_resubmitted_at || undefined,
+              approvalHistory: historyByReq.get(id) || [],
+              createdAt: r.created_at || r.submitted_at || new Date().toISOString(),
+              updatedAt: r.updated_at || undefined,
+            };
+            mergedMap.set(id, mapped);
+            overtimeRequisitionsCache.set(id, mapped);
+          }
+        }
+      } catch {
+        // Fallback gracefully to in-memory store if Supabase table hasn't been migrated yet
+      }
+    }
+
+    return Array.from(mergedMap.values()).sort((a, b) =>
+      String(b.submittedAt || b.createdAt).localeCompare(String(a.submittedAt || a.createdAt))
+    );
+  };
+
+  app.get('/api/overtime/requisitions', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_UNAUTHORIZED',
+        error: 'Authentication required to access Overtime Requisitions.',
+      });
+    }
+
+    const grantedOnly = String(req.query?.grantedOnly || '') === '1';
+    const perms = resolveOvertimePermissions(caller);
+
+    if (grantedOnly) {
+      if (!perms.viewRequests && !perms.createRequest && !perms.editRequest && !perms.viewRequisition && !perms.approveRequisition) {
+        return res.status(403).json({
+          allowed: false,
+          code: 'OVERTIME_REQUISITION_FORBIDDEN',
+          error: 'Access Restricted: Overtime Management permission is required.',
+        });
+      }
+      const all = await loadAuthoritativeOvertimeRequisitions();
+      const granted = all.filter((r) => r.status === 'Approved' && r.overtimeGranted);
+      return res.status(200).json({ allowed: true, requisitions: granted });
+    }
+
+    const auth = authorizeOvertimeSubPage(caller, 'requisition');
+    if (!auth.allowed) {
+      return res.status(403).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_FORBIDDEN',
+        error: auth.reason,
+      });
+    }
+
+    const all = await loadAuthoritativeOvertimeRequisitions();
+    const canApprove = canUserApproveRequisition(caller);
+    const scoped = canApprove
+      ? all
+      : all.filter((r) => doesActorMatchRequester(r, caller));
+
+    return res.status(200).json({
+      allowed: true,
+      canApprove,
+      canSubmit: perms.viewRequisition || caller.role === 'Super Admin',
+      requisitions: scoped,
+    });
+  });
+
+  app.post('/api/overtime/requisitions', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_UNAUTHORIZED',
+        error: 'Authentication required to submit an Overtime Requisition.',
+      });
+    }
+
+    const perms = resolveOvertimePermissions(caller);
+    if (!perms.view || (!perms.viewRequisition && caller.role !== 'Super Admin')) {
+      return res.status(403).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_SUBMIT_FORBIDDEN',
+        error: 'Forbidden: "Overtime Requisition" permission is required to submit a requisition.',
+      });
+    }
+
+    const validation = validateOvertimeRequisitionPayload(req.body || {});
+    if (!validation.valid) {
+      return res.status(400).json({
+        allowed: true,
+        success: false,
+        error: validation.error,
+      });
+    }
+
+    const existingList = await loadAuthoritativeOvertimeRequisitions();
+    const created = buildCreatedRequisition({
+      existingRequisitions: existingList,
+      overtimeDate: validation.overtimeDate!,
+      requiredWorkers: validation.requiredWorkers!,
+      requestedHours: validation.requestedHours!,
+      purposes: validation.purposes!,
+      remarks: validation.remarks,
+      actor: caller,
+    });
+
+    overtimeRequisitionsCache.set(created.id, created);
+
+    let dbSynced = false;
+    let dbError: string | undefined;
+
+    if (serverSupabase) {
+      try {
+        const { error: reqErr } = await serverSupabase.from('overtime_requisitions').insert({
+          id: created.id,
+          requisition_number: created.requisitionNumber,
+          requisition_date: created.requisitionDate,
+          overtime_date: created.overtimeDate,
+          required_workers: created.requiredWorkers,
+          requested_hours: created.requestedHours,
+          purpose: created.purpose,
+          purposes_json: created.purposes,
+          remarks: created.remarks || null,
+          requested_by_id: created.requestedById,
+          requested_by_name: created.requestedByName,
+          requested_by: created.requestedBy,
+          requested_by_role: created.requestedByRole || null,
+          requested_by_department: created.requestedByDepartment || null,
+          submitted_at: created.submittedAt,
+          status: created.status,
+          overtime_granted: false,
+          returned_count: 0,
+          created_at: created.createdAt,
+          updated_at: created.updatedAt,
+        });
+
+        if (reqErr) {
+          dbError = reqErr.message;
+        } else {
+          dbSynced = true;
+          if (created.purposes.length > 0) {
+            await serverSupabase.from('overtime_requisition_purposes').insert(
+              created.purposes.map((p) => ({
+                id: p.id,
+                requisition_id: created.id,
+                payroll_purpose_id: p.payrollPurposeId || null,
+                purpose_name: p.purposeName,
+                is_custom: Boolean(p.isCustom),
+                created_at: p.createdAt || created.createdAt,
+              }))
+            );
+          }
+          if (created.approvalHistory.length > 0) {
+            const h = created.approvalHistory[0];
+            await serverSupabase.from('overtime_requisition_approval_history').insert({
+              id: h.id,
+              requisition_id: created.id,
+              action: h.action,
+              actor_id: h.actorId || null,
+              actor_name: h.actorName,
+              actor_role: h.actorRole || null,
+              remarks: h.remarks || null,
+              previous_status: h.previousStatus || null,
+              new_status: h.newStatus,
+              action_at: h.actionAt,
+            });
+          }
+        }
+      } catch (err: any) {
+        dbError = err?.message || 'Supabase write failed';
+      }
+    }
+
+    return res.status(201).json({
+      allowed: true,
+      success: true,
+      dbSynced,
+      dbError,
+      requisition: created,
+    });
+  });
+
+  app.put('/api/overtime/requisitions/:id', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_UNAUTHORIZED',
+        error: 'Authentication required.',
+      });
+    }
+
+    const perms = resolveOvertimePermissions(caller);
+    if (!perms.view || (!perms.viewRequisition && caller.role !== 'Super Admin')) {
+      return res.status(403).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_EDIT_FORBIDDEN',
+        error: 'Forbidden: "Overtime Requisition" permission is required to edit returned requisitions.',
+      });
+    }
+
+    const id = String(req.params.id || '').trim();
+    const validation = validateOvertimeRequisitionPayload(req.body || {});
+    if (!validation.valid) {
+      return res.status(400).json({
+        allowed: true,
+        success: false,
+        error: validation.error,
+      });
+    }
+
+    return withRequisitionLock(id, async () => {
+      const list = await loadAuthoritativeOvertimeRequisitions();
+      const existing = list.find((r) => r.id === id) || overtimeRequisitionsCache.get(id);
+      if (!existing) {
+        return res.status(404).json({
+          allowed: true,
+          success: false,
+          error: `Overtime Requisition "${id}" not found.`,
+        });
+      }
+
+      const result = applyRequisitionResubmission(
+        existing,
+        {
+          overtimeDate: validation.overtimeDate!,
+          requiredWorkers: validation.requiredWorkers!,
+          requestedHours: validation.requestedHours!,
+          purposes: validation.purposes!,
+          remarks: validation.remarks,
+        },
+        caller
+      );
+
+      if ('error' in result) {
+        return res.status(result.code).json({
+          allowed: result.code !== 403,
+          success: false,
+          error: result.error,
+        });
+      }
+
+      overtimeRequisitionsCache.set(id, result.requisition);
+
+      let dbSynced = false;
+      let dbError: string | undefined;
+
+      if (serverSupabase) {
+        try {
+          const { error: updErr } = await serverSupabase
+            .from('overtime_requisitions')
+            .update({
+              overtime_date: result.requisition.overtimeDate,
+              required_workers: result.requisition.requiredWorkers,
+              requested_hours: result.requisition.requestedHours,
+              purpose: result.requisition.purpose,
+              purposes_json: result.requisition.purposes,
+              remarks: result.requisition.remarks || null,
+              status: result.requisition.status,
+              overtime_granted: false,
+              granted_at: null,
+              last_resubmitted_at: result.requisition.lastResubmittedAt || result.requisition.updatedAt,
+              updated_at: result.requisition.updatedAt,
+            })
+            .eq('id', id);
+
+          if (updErr) {
+            dbError = updErr.message;
+          } else {
+            dbSynced = true;
+            await serverSupabase
+              .from('overtime_requisition_purposes')
+              .delete()
+              .eq('requisition_id', id);
+
+            if (result.requisition.purposes.length > 0) {
+              await serverSupabase.from('overtime_requisition_purposes').insert(
+                result.requisition.purposes.map((p) => ({
+                  id: p.id,
+                  requisition_id: id,
+                  payroll_purpose_id: p.payrollPurposeId || null,
+                  purpose_name: p.purposeName,
+                  is_custom: Boolean(p.isCustom),
+                  created_at: p.createdAt || new Date().toISOString(),
+                }))
+              );
+            }
+
+            await serverSupabase.from('overtime_requisition_approval_history').insert({
+              id: result.historyEntry.id,
+              requisition_id: id,
+              action: result.historyEntry.action,
+              actor_id: result.historyEntry.actorId || null,
+              actor_name: result.historyEntry.actorName,
+              actor_role: result.historyEntry.actorRole || null,
+              remarks: result.historyEntry.remarks || null,
+              previous_status: result.historyEntry.previousStatus || null,
+              new_status: result.historyEntry.newStatus,
+              action_at: result.historyEntry.actionAt,
+            });
+          }
+        } catch (err: any) {
+          dbError = err?.message || 'Supabase update failed';
+        }
+      }
+
+      return res.status(200).json({
+        allowed: true,
+        success: true,
+        dbSynced,
+        dbError,
+        requisition: result.requisition,
+      });
+    });
+  });
+
+  app.post('/api/overtime/requisitions/:id/decision', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_UNAUTHORIZED',
+        error: 'Authentication required to review Overtime Requisitions.',
+      });
+    }
+
+    if (!canUserApproveRequisition(caller)) {
+      return res.status(403).json({
+        allowed: false,
+        code: 'OVERTIME_REQUISITION_APPROVAL_FORBIDDEN',
+        error: 'Forbidden: "Overtime Requisition Approval" permission is required for Head Office approval decisions.',
+      });
+    }
+
+    const id = String(req.params.id || '').trim();
+    const rawDecision = String(req.body?.decision || '').trim().toUpperCase();
+    if (!['APPROVE', 'REJECT', 'RETURN'].includes(rawDecision)) {
+      return res.status(400).json({
+        allowed: true,
+        success: false,
+        error: 'Invalid decision action. Expected APPROVE, REJECT, or RETURN.',
+      });
+    }
+    const decision = rawDecision as RequisitionDecisionAction;
+    const remarks = String(req.body?.remarks || '');
+
+    return withRequisitionLock(id, async () => {
+      const list = await loadAuthoritativeOvertimeRequisitions();
+      const existing = list.find((r) => r.id === id) || overtimeRequisitionsCache.get(id);
+      if (!existing) {
+        return res.status(404).json({
+          allowed: true,
+          success: false,
+          error: `Overtime Requisition "${id}" not found.`,
+        });
+      }
+
+      const result = applyRequisitionDecision(existing, decision, caller, remarks);
+      if ('error' in result) {
+        return res.status(result.code).json({
+          allowed: result.code !== 403,
+          success: false,
+          error: result.error,
+        });
+      }
+
+      overtimeRequisitionsCache.set(id, result.requisition);
+
+      let dbSynced = false;
+      let dbError: string | undefined;
+
+      if (serverSupabase) {
+        try {
+          const { error: updErr } = await serverSupabase
+            .from('overtime_requisitions')
+            .update({
+              status: result.requisition.status,
+              overtime_granted: result.requisition.overtimeGranted,
+              granted_at: result.requisition.grantedAt || null,
+              approved_by_id: result.requisition.approvedById || null,
+              approved_by_name: result.requisition.approvedByName || null,
+              approved_by: result.requisition.approvedBy || null,
+              approved_at: result.requisition.approvedAt || null,
+              approval_remarks: result.requisition.approvalRemarks || null,
+              returned_count: result.requisition.returnedCount || 0,
+              updated_at: result.requisition.updatedAt,
+            })
+            .eq('id', id)
+            .eq('status', 'Pending Approval');
+
+          if (updErr) {
+            dbError = updErr.message;
+          } else {
+            dbSynced = true;
+            await serverSupabase.from('overtime_requisition_approval_history').insert({
+              id: result.historyEntry.id,
+              requisition_id: id,
+              action: result.historyEntry.action,
+              actor_id: result.historyEntry.actorId || null,
+              actor_name: result.historyEntry.actorName,
+              actor_role: result.historyEntry.actorRole || null,
+              remarks: result.historyEntry.remarks || null,
+              previous_status: result.historyEntry.previousStatus || null,
+              new_status: result.historyEntry.newStatus,
+              action_at: result.historyEntry.actionAt,
+            });
+          }
+        } catch (err: any) {
+          dbError = err?.message || 'Supabase decision update failed';
+        }
+      }
+
+      return res.status(200).json({
+        allowed: true,
+        success: true,
+        dbSynced,
+        dbError,
+        requisition: result.requisition,
+      });
+    });
   });
 
   app.get('/api/overtime/attendances', async (req, res) => {

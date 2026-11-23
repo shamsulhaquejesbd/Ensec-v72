@@ -90,9 +90,10 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
         const q = searchQuery.toLowerCase();
         const matchesEmp = req.employeeName.toLowerCase().includes(q) || req.employeeCode.toLowerCase().includes(q);
         const matchesReq = req.requestNumber.toLowerCase().includes(q);
+        const matchesRequisition = (req.requisitionNumber || '').toLowerCase().includes(q);
         const matchesBatch = (req.productionBatchNumber || '').toLowerCase().includes(q);
         const matchesPurpose = (req.projectPurpose || '').toLowerCase().includes(q);
-        if (!matchesEmp && !matchesReq && !matchesBatch && !matchesPurpose) return false;
+        if (!matchesEmp && !matchesReq && !matchesRequisition && !matchesBatch && !matchesPurpose) return false;
       }
 
       // Status
@@ -342,6 +343,11 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
                         {req.sourceType === 'ATTENDANCE_AUTO' && (
                           <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
                             Attendance Auto
+                          </span>
+                        )}
+                        {req.requisitionNumber && (
+                          <span className="px-1.5 py-0.5 rounded font-mono font-bold text-[10px] bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                            Req: {req.requisitionNumber}
                           </span>
                         )}
                         <span className="px-1.5 py-0.5 rounded font-mono font-bold text-[10px] bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">

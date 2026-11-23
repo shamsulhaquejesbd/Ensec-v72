@@ -19,6 +19,73 @@ export type OvertimeStatus =
   | 'Rejected'
   | 'Cancelled';
 
+export type OvertimeRequisitionStatus =
+  | 'Pending Approval'
+  | 'Approved'
+  | 'Rejected'
+  | 'Returned for Correction';
+
+export type OvertimeRequisitionApprovalAction =
+  | 'SUBMITTED'
+  | 'RESUBMITTED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'RETURNED_FOR_CORRECTION'
+  | 'UPDATED';
+
+export interface OvertimeRequisitionPurposeItem {
+  id: string;
+  requisitionId?: string;
+  payrollPurposeId?: string;
+  purposeName: string;
+  isCustom: boolean;
+  createdAt?: string;
+}
+
+export interface OvertimeRequisitionApprovalHistoryEntry {
+  id: string;
+  requisitionId: string;
+  action: OvertimeRequisitionApprovalAction;
+  actorId?: string;
+  actorName: string;
+  actorRole?: string;
+  remarks?: string;
+  previousStatus?: OvertimeRequisitionStatus;
+  newStatus: OvertimeRequisitionStatus;
+  actionAt: string;
+}
+
+export interface OvertimeRequisition {
+  id: string;
+  requisitionNumber: string; // e.g. "OTRQ-2026-001"
+  requisitionDate: string; // YYYY-MM-DD
+  overtimeDate: string; // YYYY-MM-DD
+  requiredWorkers: number;
+  requestedHours: number;
+  purpose: string;
+  purposes: OvertimeRequisitionPurposeItem[];
+  remarks?: string;
+  requestedById: string;
+  requestedByName: string;
+  requestedBy: string;
+  requestedByRole?: string;
+  requestedByDepartment?: string;
+  submittedAt: string;
+  status: OvertimeRequisitionStatus;
+  overtimeGranted: boolean;
+  grantedAt?: string;
+  approvedById?: string;
+  approvedByName?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  approvalRemarks?: string;
+  returnedCount?: number;
+  lastResubmittedAt?: string;
+  approvalHistory: OvertimeRequisitionApprovalHistoryEntry[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export type OvertimePurposeCategory =
   | 'Direct Production'
   | 'Rework & QC'
@@ -70,6 +137,8 @@ export interface OvertimeRequest {
   productName?: string;
   projectPurpose: string;
   sourceType?: 'MANUAL' | 'QR_ATTENDANCE_AUTO' | 'ATTENDANCE_AUTO';
+  requisitionId?: string;
+  requisitionNumber?: string;
   purposeId?: string;
   purposeSelectedBy?: string;
   purposeSelectedAt?: string;

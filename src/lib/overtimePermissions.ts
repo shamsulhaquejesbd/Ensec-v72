@@ -10,6 +10,7 @@
 export const OVERTIME_PAGE_PERMISSION_KEYS = {
   VIEW: 'view',
   VIEW_REQUESTS: 'view_requests',
+  VIEW_REQUISITION: 'view_requisition',
   VIEW_ATTENDANCE: 'view_attendance',
   VIEW_BATCH_ALLOCATION: 'view_batch_allocation',
   VIEW_PAYROLL_SYNC: 'view_payroll_sync',
@@ -27,6 +28,7 @@ export const OVERTIME_PAGE_PERMISSION_KEYS = {
   VIEW_COST: 'view_cost',
   CONFIGURE_POLICY: 'configure_policy',
   EXPORT: 'export',
+  APPROVE_REQUISITION: 'approve_requisition',
   REPORT_EMPLOYEE_MONTHLY: 'report_employee_monthly',
   REPORT_DAILY_FACTORY_BILL: 'report_daily_factory_bill',
   REPORT_PRODUCTION_BATCH_COST: 'report_production_batch_cost',
@@ -38,6 +40,7 @@ export const OVERTIME_PAGE_PERMISSION_KEYS = {
 
 export type OvertimePageSlug =
   | 'requests'
+  | 'requisition'
   | 'attendance'
   | 'batch_allocation'
   | 'payroll_costing_sync'
@@ -47,6 +50,7 @@ export type OvertimePageSlug =
 export interface OvertimePermissions {
   view: boolean;
   viewRequests: boolean;
+  viewRequisition: boolean;
   viewAttendance: boolean;
   viewBatchAllocation: boolean;
   viewPayrollSync: boolean;
@@ -64,6 +68,7 @@ export interface OvertimePermissions {
   viewCost: boolean;
   configurePolicy: boolean;
   exportReports: boolean;
+  approveRequisition: boolean;
   reportEmployeeMonthly: boolean;
   reportDailyFactoryBill: boolean;
   reportProductionBatchCost: boolean;
@@ -76,6 +81,7 @@ export interface OvertimePermissions {
 export const ALL_OVERTIME_PERMISSIONS_OFF: OvertimePermissions = {
   view: false,
   viewRequests: false,
+  viewRequisition: false,
   viewAttendance: false,
   viewBatchAllocation: false,
   viewPayrollSync: false,
@@ -93,6 +99,7 @@ export const ALL_OVERTIME_PERMISSIONS_OFF: OvertimePermissions = {
   viewCost: false,
   configurePolicy: false,
   exportReports: false,
+  approveRequisition: false,
   reportEmployeeMonthly: false,
   reportDailyFactoryBill: false,
   reportProductionBatchCost: false,
@@ -105,6 +112,7 @@ export const ALL_OVERTIME_PERMISSIONS_OFF: OvertimePermissions = {
 export const ALL_OVERTIME_PERMISSIONS_ON: OvertimePermissions = {
   view: true,
   viewRequests: true,
+  viewRequisition: true,
   viewAttendance: true,
   viewBatchAllocation: true,
   viewPayrollSync: true,
@@ -122,6 +130,7 @@ export const ALL_OVERTIME_PERMISSIONS_ON: OvertimePermissions = {
   viewCost: true,
   configurePolicy: true,
   exportReports: true,
+  approveRequisition: true,
   reportEmployeeMonthly: true,
   reportDailyFactoryBill: true,
   reportProductionBatchCost: true,
@@ -204,6 +213,7 @@ export function resolveOvertimePermissions(user: any): OvertimePermissions {
   return {
     view: true,
     viewRequests: resolveSubPageFlag(otPerms, allowedModules, 'view_requests', 'overtime-requests'),
+    viewRequisition: resolveSubPageFlag(otPerms, allowedModules, 'view_requisition', 'overtime-requisition'),
     viewAttendance: resolveSubPageFlag(otPerms, allowedModules, 'view_attendance', 'overtime-attendance'),
     viewBatchAllocation: resolveSubPageFlag(otPerms, allowedModules, 'view_batch_allocation', 'overtime-batch-allocation'),
     viewPayrollSync: resolveSubPageFlag(otPerms, allowedModules, 'view_payroll_sync', 'overtime-sync'),
@@ -221,6 +231,7 @@ export function resolveOvertimePermissions(user: any): OvertimePermissions {
     viewCost: Boolean(otPerms?.view_cost),
     configurePolicy: Boolean(otPerms?.configure_policy),
     exportReports: Boolean(otPerms?.export),
+    approveRequisition: Boolean(otPerms?.approve_requisition),
     reportEmployeeMonthly: resolveReportFlag(otPerms, allowedModules, 'report_employee_monthly', viewReports),
     reportDailyFactoryBill: resolveReportFlag(otPerms, allowedModules, 'report_daily_factory_bill', viewReports),
     reportProductionBatchCost: resolveReportFlag(otPerms, allowedModules, 'report_production_batch_cost', viewReports),
@@ -245,6 +256,7 @@ export function authorizeOvertimeSubPage(
 
   const map: Record<OvertimePageSlug, { ok: boolean; label: string }> = {
     requests: { ok: perms.viewRequests, label: 'OT Requests' },
+    requisition: { ok: perms.viewRequisition || perms.approveRequisition, label: 'Overtime Requisition' },
     attendance: { ok: perms.viewAttendance, label: 'OT Attendance & Bio-Punches' },
     batch_allocation: { ok: perms.viewBatchAllocation, label: 'Batch Allocation & Split' },
     payroll_costing_sync: { ok: perms.viewPayrollSync, label: 'Payroll & Costing Dual-Sync' },

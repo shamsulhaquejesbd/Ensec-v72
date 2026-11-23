@@ -64,6 +64,7 @@ export interface PermissionTemplate {
 
 export const OVERTIME_SUBPAGE_ACTION_MAP: Record<string, string> = {
   'overtime-requests': 'view_requests',
+  'overtime-requisition': 'view_requisition',
   'overtime-attendance': 'view_attendance',
   'overtime-batch-allocation': 'view_batch_allocation',
   'overtime-sync': 'view_payroll_sync',
@@ -932,9 +933,22 @@ export const ERP_PAGE_PERMISSIONS_REGISTRY: ERPModuleCategory[] = [
           { key: 'configure_policy', label: 'Configure OT Policies', description: 'Can configure wage bases, standard monthly hours, and overtime multipliers' },
           { key: 'export', label: 'Export Overtime Reports', description: 'Can export monthly overtime and costing reports to Excel' },
           {
+            key: 'approve_requisition',
+            label: 'Overtime Requisition Approval',
+            description: 'Head Office clearance to review submitted Factory requisitions and Approve, Reject, or Return for Correction',
+            isApprovalAction: true,
+          },
+          {
             key: 'view_requests',
             label: 'OT Requests',
             description: 'Can access the OT Requests page and overtime requisition queue',
+            subsection: 'Page-Wise Access Permissions',
+            group: 'Overtime Management Pages',
+          },
+          {
+            key: 'view_requisition',
+            label: 'Overtime Requisition',
+            description: 'Can access the Overtime Requisition page, submit Factory requisitions, view own history, and edit returned requisitions',
             subsection: 'Page-Wise Access Permissions',
             group: 'Overtime Management Pages',
           },
@@ -1290,6 +1304,7 @@ export const PERMISSION_TEMPLATES: PermissionTemplate[] = [
                 ['view_raw_material_stock_value', 'view_raw_material_purchase_rate', 'view_batch_stock_value'].includes(act.key)) ||
               (page.id === 'basic-data-products' &&
                 ['view_distributor_price', 'view_retail_mrp'].includes(act.key)) ||
+              (page.id === 'overtime-management' && act.key === 'approve_requisition') ||
               (page.id === 'manufacturing' &&
                 [
                   'view_raw_material_cost',
@@ -1371,6 +1386,7 @@ export const PERMISSION_TEMPLATES: PermissionTemplate[] = [
             act.key === 'view_revenue' ||
             act.key === 'view_cost' ||
             act.key === 'view_requests' ||
+            act.key === 'view_requisition' ||
             act.key === 'view_attendance' ||
             act.key === 'view_batch_allocation' ||
             act.key === 'view_payroll_sync' ||
@@ -1424,6 +1440,7 @@ export function hasPageAction(
     'field-force': 'basic-data-field-force',
     'overtime-dashboard': 'overtime-management',
     'overtime-requests': 'overtime-management',
+    'overtime-requisition': 'overtime-management',
     'overtime-attendance': 'overtime-management',
     'overtime-batch-allocation': 'overtime-management',
     'overtime-sync': 'overtime-management',
@@ -1442,15 +1459,21 @@ export function hasPageAction(
   if (pagePerms && typeof pagePerms === 'object') {
     const pageObj = pagePerms[canonicalPageId] || pagePerms[pageId];
 
-    // Enforce the 6 page-wise Overtime Management permissions & 7 report permissions
+    // Enforce the page-wise Overtime Management permissions & 7 report permissions
     if (canonicalPageId === 'overtime-management') {
       if (pageObj && typeof pageObj === 'object') {
+        if (actionKey === 'approve_requisition') {
+          return Boolean(pageObj.view && pageObj.approve_requisition);
+        }
         if (actionKey === 'view' && otSubPageActionKey) {
           if (!pageObj.view) return false;
+          if (otSubPageActionKey === 'view_requisition' && pageObj.approve_requisition) {
+            return true;
+          }
           if (pageObj[otSubPageActionKey] !== undefined) {
             return Boolean(pageObj[otSubPageActionKey]);
           }
-          return true; // Preserve access for existing users saved before the 6 sub-page keys existed
+          return true; // Preserve access for existing users saved before the sub-page keys existed
         }
         if (OVERTIME_SUBPAGE_ACTION_KEYS.includes(actionKey)) {
           if (!pageObj.view) return false;

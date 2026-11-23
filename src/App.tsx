@@ -149,6 +149,8 @@ export function pathnameToModule(pathname: string): string {
     'field-tracker': 'field-tracker',
     'overtime': 'overtime-management',
     'overtime-management': 'overtime-management',
+    'overtime-requisition': 'overtime-requisition',
+    'overtime/requisition': 'overtime-requisition',
     'raw-material-receive': 'raw-material-receive',
     'raw-material-inventory': 'raw-material-inventory',
     'finished-goods-receive': 'stock-cid-receive',
@@ -619,6 +621,7 @@ function MainApp() {
                   initialSubTab={
                     activeModule === 'overtime-dashboard' ? 'dashboard' :
                     activeModule === 'overtime-requests' ? 'requests' :
+                    activeModule === 'overtime-requisition' ? 'requisition' :
                     activeModule === 'overtime-attendance' ? 'attendance' :
                     activeModule === 'overtime-batch-allocation' ? 'batch_allocation' :
                     activeModule === 'overtime-sync' ? 'payroll_costing_sync' :

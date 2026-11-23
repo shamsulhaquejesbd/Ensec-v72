@@ -23,6 +23,7 @@ import {
   ShieldAlert,
   Info,
   Search,
+  ClipboardList,
 } from 'lucide-react';
 import {
   OvertimeRequest,
@@ -52,6 +53,7 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
     productionOrders,
     salaryStructures,
     overtimeRequests,
+    grantedOvertimeRequisitions,
     getEmployeeEffectiveOvertimePolicy,
     createOvertimeRequest,
     updateOvertimeRequest,
@@ -150,6 +152,25 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
   const [overtimeReason, setOvertimeReason] = useState<string>(
     editingRequest?.overtimeReason || ''
   );
+  const [requisitionId, setRequisitionId] = useState<string>(
+    editingRequest?.requisitionId || ''
+  );
+
+  const sortedGrantedRequisitions = useMemo(() => {
+    const list = [...grantedOvertimeRequisitions];
+    list.sort((a, b) => {
+      const aMatch = a.overtimeDate === overtimeDate ? 0 : 1;
+      const bMatch = b.overtimeDate === overtimeDate ? 0 : 1;
+      if (aMatch !== bMatch) return aMatch - bMatch;
+      return b.overtimeDate.localeCompare(a.overtimeDate);
+    });
+    return list;
+  }, [grantedOvertimeRequisitions, overtimeDate]);
+
+  const selectedGrantedReq = useMemo(() => {
+    if (!requisitionId) return null;
+    return sortedGrantedRequisitions.find((r) => r.id === requisitionId) || null;
+  }, [sortedGrantedRequisitions, requisitionId]);
 
   // Retrieve employee's assigned individual overtime policy based on overtime date
   const employeePolicy: EmployeeOvertimePolicy | null = useMemo(() => {
@@ -256,6 +277,9 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
             },
           ];
 
+    const linkedReqId = selectedGrantedReq?.id || (requisitionId && editingRequest?.requisitionId === requisitionId ? editingRequest.requisitionId : undefined);
+    const linkedReqNumber = selectedGrantedReq?.requisitionNumber || (requisitionId && editingRequest?.requisitionId === requisitionId ? editingRequest.requisitionNumber : undefined);
+
     if (editingRequest) {
       updateOvertimeRequest(editingRequest.id, {
         employeeId: selectedEmployee.id,
@@ -271,6 +295,8 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
         productionBatchNumber: batchNo || undefined,
         productName: prodName || undefined,
         projectPurpose: projectPurpose.trim() || (batchNo ? `Production shift on batch ${batchNo}` : purposeCategory),
+        requisitionId: linkedReqId,
+        requisitionNumber: linkedReqNumber,
         expectedStartTime,
         expectedEndTime,
         expectedHours: liveCalculations.hours,
@@ -300,6 +326,8 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
       productionBatchNumber: batchNo || undefined,
       productName: prodName || undefined,
       projectPurpose: projectPurpose.trim() || (batchNo ? `Production shift on batch ${batchNo}` : purposeCategory),
+      requisitionId: linkedReqId,
+      requisitionNumber: linkedReqNumber,
       expectedStartTime,
       expectedEndTime,
       expectedHours: liveCalculations.hours,
@@ -539,6 +567,40 @@ export const NewOvertimeRequestModal: React.FC<NewOvertimeRequestModalProps> = (
                 <option value="General Operations">General Factory Operations</option>
               </select>
             </div>
+          </div>
+
+          {/* Approved Overtime Requisition Link (Step 3: Overtime Granted) */}
+          <div className="p-3 rounded-xl border border-emerald-200/80 dark:border-emerald-900/50 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                <ClipboardList className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Link Approved Overtime Requisition (Optional)</span>
+              </label>
+              <span className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                {sortedGrantedRequisitions.length} Granted Requisition{sortedGrantedRequisitions.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <select
+              value={requisitionId}
+              onChange={(e) => setRequisitionId(e.target.value)}
+              className="w-full py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium"
+            >
+              <option value="">-- No Requisition Linked --</option>
+              {editingRequest?.requisitionId &&
+                !sortedGrantedRequisitions.some((r) => r.id === editingRequest.requisitionId) && (
+                  <option value={editingRequest.requisitionId}>
+                    {editingRequest.requisitionNumber || editingRequest.requisitionId} (Currently Linked)
+                  </option>
+                )}
+              {sortedGrantedRequisitions.map((req) => (
+                <option key={req.id} value={req.id}>
+                  {req.requisitionNumber} • {req.overtimeDate === overtimeDate ? `[Matching Date ${req.overtimeDate}]` : req.overtimeDate} • {req.requiredWorkers} workers × {req.requestedHours}h — {req.purpose}
+                </option>
+              ))}
+            </select>
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+              Only Head Office approved (<strong>Overtime Granted</strong>) requisitions appear here. Linking tracks authorization without altering attendance or payroll calculations.
+            </p>
           </div>
 
           {/* Production Order & Batch Selection */}
