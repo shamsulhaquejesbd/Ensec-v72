@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { Calendar, ChevronDown, Download, Filter, Printer } from 'lucide-react';
+import { Calendar, ChevronDown, Clock, Download, Filter, Printer } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
-import { calculateNetWorkingHours } from '../../lib/geofence.ts';
+import { formatTime12Hour } from '../../lib/geofence.ts';
+import { calculateDailyWagesShiftBreakdown } from '../../lib/dailyWagesCalculation.ts';
 import { findLinkedUserForEmployee } from '../../lib/fieldForceAuth.ts';
 
 interface DailyWagesBillFactoryProps {
@@ -25,7 +26,11 @@ interface DailyWagesRow {
   workDay: number;
   ratePerDay: number;
   ratePerHour: number;
+  dailyRegularHours: number[];
+  dailyOvertimeHours: number[];
   dailyHours: number[];
+  regularHours: number;
+  overtimeHours: number;
   totalHours: number;
   presentDays: number;
   totalAmount: number;
@@ -336,8 +341,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
     [activeYearNum, activeMonthNum]
   );
 
-  // 9 left metadata cols + daysInActiveMonth + 5 right summary/signature cols
-  const totalTableCols = 9 + daysInActiveMonth + 5;
+  // 9 left metadata cols + daysInActiveMonth + 7 right summary/signature cols (Reg. HR, OT HR, Total HR, Present Day, Amount, Signature, Mobil NO)
+  const totalTableCols = 9 + daysInActiveMonth + 7;
 
   const dayHeaders = useMemo(() => {
     const shortWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -379,6 +384,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
     const monthWorkDays = getMonthlyWorkingDays(activeYearNum, activeMonthNum);
     const dailyWorkingHours =
       Number(payrollSettings?.standardDailyHours || payrollSettings?.standardWorkHoursPerDay) || 8;
+    const configuredShiftEndTime = payrollSettings?.shiftEndTime || '';
+    const configuredShiftStartTime = payrollSettings?.shiftStartTime || '';
 
     const q = searchQuery.trim().toLowerCase();
 
@@ -453,6 +460,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       const ratePerDay = workDay > 0 ? Math.round(monthlySalary / workDay) : 0;
       const ratePerHour = dailyWorkingHours > 0 ? Math.round(ratePerDay / dailyWorkingHours) : 0;
 
+      const dailyRegularHours = new Array(daysInActiveMonth).fill(0);
+      const dailyOvertimeHours = new Array(daysInActiveMonth).fill(0);
       const dailyHours = new Array(daysInActiveMonth).fill(0);
       const seenDayRecordKeys = new Set<string>();
 
@@ -467,9 +476,20 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
 
         const checkIn = rec.checkInTime || rec.inTime || '';
         const checkOut = rec.checkOutTime || rec.outTime || '';
-        let hrs = 0;
+        let regHrs = 0;
+        let otHrs = 0;
+        let totHrs = 0;
+
         if (checkIn && checkOut) {
-          hrs = calculateNetWorkingHours(checkIn, checkOut);
+          const breakdown = calculateDailyWagesShiftBreakdown({
+            checkInTime: checkIn,
+            checkOutTime: checkOut,
+            defaultShiftEndTime: configuredShiftEndTime,
+            defaultShiftStartTime: configuredShiftStartTime,
+          });
+          regHrs = breakdown.regularHours;
+          otHrs = breakdown.overtimeHours;
+          totHrs = breakdown.totalHours;
         } else if (
           rec.status !== 'Absent' &&
           rec.status !== 'Leave' &&
@@ -478,15 +498,27 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
           typeof rec.workHours === 'number' &&
           rec.workHours > 0
         ) {
-          hrs = rec.workHours;
+          const manualTotal = Math.round(rec.workHours * 100) / 100;
+          const manualOt =
+            typeof rec.overtimeHours === 'number' && rec.overtimeHours > 0
+              ? Math.min(Math.round(rec.overtimeHours * 100) / 100, manualTotal)
+              : 0;
+          otHrs = manualOt;
+          regHrs = Math.max(0, Math.round((manualTotal - otHrs) * 100) / 100);
+          totHrs = Math.round((regHrs + otHrs) * 100) / 100;
         }
 
-        if (hrs > 0) {
-          dailyHours[parsed.day - 1] = Math.round((dailyHours[parsed.day - 1] + hrs) * 100) / 100;
+        if (totHrs > 0 || regHrs > 0 || otHrs > 0) {
+          const idx = parsed.day - 1;
+          dailyRegularHours[idx] = Math.round((dailyRegularHours[idx] + regHrs) * 100) / 100;
+          dailyOvertimeHours[idx] = Math.round((dailyOvertimeHours[idx] + otHrs) * 100) / 100;
+          dailyHours[idx] = Math.round((dailyHours[idx] + totHrs) * 100) / 100;
         }
       });
 
-      const totalHours = Math.round(dailyHours.reduce((sum, h) => sum + h, 0) * 100) / 100;
+      const regularHours = Math.round(dailyRegularHours.reduce((sum, h) => sum + h, 0) * 100) / 100;
+      const overtimeHours = Math.round(dailyOvertimeHours.reduce((sum, h) => sum + h, 0) * 100) / 100;
+      const totalHours = Math.round((regularHours + overtimeHours) * 100) / 100;
       const presentDays = dailyWorkingHours > 0 ? totalHours / dailyWorkingHours : 0;
       const totalAmount =
         workDay > 0 && dailyWorkingHours > 0
@@ -503,7 +535,11 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
         workDay,
         ratePerDay,
         ratePerHour,
+        dailyRegularHours,
+        dailyOvertimeHours,
         dailyHours,
+        regularHours,
+        overtimeHours,
         totalHours,
         presentDays,
         totalAmount,
@@ -512,6 +548,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
     });
 
     const dailyTotals = new Array(daysInActiveMonth).fill(0);
+    let grandRegularHours = 0;
+    let grandOvertimeHours = 0;
     let grandTotalHours = 0;
     let grandTotalAmount = 0;
 
@@ -519,16 +557,22 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       row.dailyHours.forEach((h, i) => {
         dailyTotals[i] = Math.round((dailyTotals[i] + h) * 100) / 100;
       });
+      grandRegularHours += row.regularHours;
+      grandOvertimeHours += row.overtimeHours;
       grandTotalHours += row.totalHours;
       grandTotalAmount += row.totalAmount;
     });
 
+    grandRegularHours = Math.round(grandRegularHours * 100) / 100;
+    grandOvertimeHours = Math.round(grandOvertimeHours * 100) / 100;
     grandTotalHours = Math.round(grandTotalHours * 100) / 100;
     const grandPresentDays = dailyWorkingHours > 0 ? grandTotalHours / dailyWorkingHours : 0;
 
     return {
       rows,
       dailyTotals,
+      grandRegularHours,
+      grandOvertimeHours,
       grandTotalHours,
       grandPresentDays,
       grandTotalAmount: Math.round(grandTotalAmount),
@@ -574,7 +618,7 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
     sheetRows.push([
       '', '', '', '', '', '', '', '', '',
       ...dayHeaders.map((d) => d.weekday),
-      '', '', '', '', '',
+      '', '', '', '', '', '', '',
     ]);
     sheetRows.push([
       'S/N',
@@ -587,6 +631,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       'Rate/ Day',
       'Rate/ Hrs',
       ...dayHeaders.map((d) => d.day),
+      'Reg. HR',
+      'OT HR',
       'Total HR',
       'Present Day',
       'Amount',
@@ -606,6 +652,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
         row.ratePerDay,
         row.ratePerHour,
         ...row.dailyHours.map((h) => (h > 0 ? Number(h.toFixed(2)) : '')),
+        row.regularHours > 0 ? Number(row.regularHours.toFixed(2)) : 0,
+        row.overtimeHours > 0 ? Number(row.overtimeHours.toFixed(2)) : 0,
         row.totalHours > 0 ? Number(row.totalHours.toFixed(2)) : 0,
         row.presentDays > 0 ? Number(row.presentDays.toFixed(2)) : 0,
         row.totalAmount,
@@ -625,6 +673,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
       '',
       '',
       ...wagesBillSheet.dailyTotals.map((t) => (t > 0 ? Number(t.toFixed(2)) : '')),
+      wagesBillSheet.grandRegularHours > 0 ? Number(wagesBillSheet.grandRegularHours.toFixed(2)) : 0,
+      wagesBillSheet.grandOvertimeHours > 0 ? Number(wagesBillSheet.grandOvertimeHours.toFixed(2)) : 0,
       wagesBillSheet.grandTotalHours > 0 ? Number(wagesBillSheet.grandTotalHours.toFixed(2)) : 0,
       wagesBillSheet.grandPresentDays > 0 ? Number(wagesBillSheet.grandPresentDays.toFixed(2)) : 0,
       wagesBillSheet.grandTotalAmount,
@@ -779,6 +829,17 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
               className="px-2 py-1 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 font-mono"
             />
           </div>
+
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200"
+            title="Configured in Payroll & HR → Settings → Default Shift End Time (12-Hr AM/PM)"
+          >
+            <Clock className="w-3.5 h-3.5 text-slate-400" />
+            <span className="font-semibold">Shift End (Settings):</span>
+            <span className="font-mono font-bold">
+              {formatTime12Hour(payrollSettings?.shiftEndTime) || 'Not Set'}
+            </span>
+          </div>
         </div>
 
         {canExport && (
@@ -846,6 +907,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
                 <th className="border border-black px-1 py-0.5 bg-white"></th>
                 <th className="border border-black px-1 py-0.5 bg-white"></th>
                 <th className="border border-black px-1 py-0.5 bg-white"></th>
+                <th className="border border-black px-1 py-0.5 bg-white"></th>
+                <th className="border border-black px-1 py-0.5 bg-white"></th>
               </tr>
 
               {/* Main Header Row */}
@@ -871,6 +934,8 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
                     {d.day}
                   </th>
                 ))}
+                <th className="border border-black px-1.5 py-1 whitespace-nowrap">Reg. HR</th>
+                <th className="border border-black px-1.5 py-1 whitespace-nowrap">OT HR</th>
                 <th className="border border-black px-1.5 py-1 whitespace-nowrap">Total HR</th>
                 <th className="border border-black px-1.5 py-1 whitespace-nowrap">Present Day</th>
                 <th className="border border-black px-2 py-1 whitespace-nowrap">Amount</th>
@@ -923,15 +988,43 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
                     <td className="border border-black px-1.5 py-0.5 text-center font-sans">
                       {row.ratePerHour}
                     </td>
-                    {row.dailyHours.map((hrs, idx) => (
-                      <td
-                        key={`cell-${row.sn}-${idx}`}
-                        className="border border-black px-0.5 py-0.5 text-center font-sans"
-                      >
-                        {hrs > 0 ? formatHoursValue(hrs) : ''}
-                      </td>
-                    ))}
+                    {row.dailyHours.map((hrs, idx) => {
+                      const reg = row.dailyRegularHours[idx] || 0;
+                      const ot = row.dailyOvertimeHours[idx] || 0;
+                      return (
+                        <td
+                          key={`cell-${row.sn}-${idx}`}
+                          title={
+                            hrs > 0
+                              ? `Regular: ${formatHoursValue(reg)}h | OT: ${formatHoursValue(ot)}h | Total: ${formatHoursValue(hrs)}h`
+                              : undefined
+                          }
+                          className="border border-black px-0.5 py-0.5 text-center font-sans leading-tight"
+                        >
+                          {hrs > 0 ? (
+                            ot > 0 ? (
+                              <div className="flex flex-col items-center">
+                                <span>{formatHoursValue(reg)}</span>
+                                <span className="text-[8px] font-semibold">
+                                  +{formatHoursValue(ot)}
+                                </span>
+                              </div>
+                            ) : (
+                              formatHoursValue(reg)
+                            )
+                          ) : (
+                            ''
+                          )}
+                        </td>
+                      );
+                    })}
                     <td className="border border-black px-1.5 py-0.5 text-center font-sans">
+                      {formatHoursValue(row.regularHours)}
+                    </td>
+                    <td className="border border-black px-1.5 py-0.5 text-center font-sans">
+                      {formatHoursValue(row.overtimeHours)}
+                    </td>
+                    <td className="border border-black px-1.5 py-0.5 text-center font-sans font-semibold">
                       {formatHoursValue(row.totalHours)}
                     </td>
                     <td className="border border-black px-1.5 py-0.5 text-center font-sans">
@@ -967,6 +1060,12 @@ export const DailyWagesBillFactory: React.FC<DailyWagesBillFactoryProps> = ({
                     {daySum > 0 ? formatHoursValue(daySum) : ''}
                   </td>
                 ))}
+                <td className="border border-black px-1.5 py-1 text-center font-sans">
+                  {formatHoursValue(wagesBillSheet.grandRegularHours)}
+                </td>
+                <td className="border border-black px-1.5 py-1 text-center font-sans">
+                  {formatHoursValue(wagesBillSheet.grandOvertimeHours)}
+                </td>
                 <td className="border border-black px-1.5 py-1 text-center font-sans">
                   {formatHoursValue(wagesBillSheet.grandTotalHours)}
                 </td>
