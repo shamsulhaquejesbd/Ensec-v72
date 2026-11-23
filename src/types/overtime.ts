@@ -69,6 +69,10 @@ export interface OvertimeRequest {
   productionBatchNumber?: string;
   productName?: string;
   projectPurpose: string;
+  sourceType?: 'MANUAL' | 'QR_ATTENDANCE_AUTO';
+  purposeId?: string;
+  purposeSelectedBy?: string;
+  purposeSelectedAt?: string;
   
   // Time expectations
   expectedStartTime: string; // "HH:mm", e.g. "18:00"

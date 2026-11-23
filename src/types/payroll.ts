@@ -531,6 +531,14 @@ export interface SalaryPaymentRecord {
 // --------------------------------------------------------------------------
 // 9. Configurable Payroll Settings
 // --------------------------------------------------------------------------
+export interface OvertimePurposeOption {
+  id: string;
+  name: string;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface PayrollSettings {
   workingDaysPerMonth?: number;
   standardWorkHoursPerDay?: number;
@@ -540,6 +548,7 @@ export interface PayrollSettings {
   overtimeConfig?: {
     hourlyRateMultiplier: number;
   };
+  overtimePurposes?: OvertimePurposeOption[];
   lateGracePeriodMinutes?: number;
   shiftStartTime?: string; // e.g. '09:00'
   shiftEndTime?: string;   // e.g. '18:00'
@@ -629,6 +638,7 @@ ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_start_time TE
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_end_time TEXT DEFAULT '18:00';
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS late_grace_period_minutes INT DEFAULT 15;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS max_gps_accuracy_meters INT DEFAULT 100;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS overtime_purposes JSONB;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_by TEXT;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 

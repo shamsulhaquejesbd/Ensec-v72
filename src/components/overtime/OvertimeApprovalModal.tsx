@@ -6,7 +6,7 @@
  * Workflow Engine: Supervisor → Production Manager → HR/Accounts → Final Approval.
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useERP } from '../../context/ERPContext.tsx';
 import {
   X,
@@ -22,8 +22,10 @@ import {
   ArrowRight,
   FastForward,
   Info,
+  Tag,
 } from 'lucide-react';
 import { OvertimeRequest } from '../../types/overtime.ts';
+import { DEFAULT_OVERTIME_PURPOSES } from '../../mock/payrollData.ts';
 import { formatTime12Hour } from '../../lib/geofence.ts';
 
 interface OvertimeApprovalModalProps {
@@ -38,6 +40,7 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
   onSuccess,
 }) => {
   const {
+    payrollSettings,
     advanceOvertimeWorkflow,
     rejectOvertimeRequest,
     currentUser,
@@ -93,17 +96,68 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
   });
   const [remarks, setRemarks] = useState<string>('');
   const [rejectionReason, setRejectionReason] = useState<string>('');
+  const [selectedPurpose, setSelectedPurpose] = useState<string>(
+    () => (request.projectPurpose || '').trim()
+  );
+
+  const activePurposeOptions = useMemo(() => {
+    const raw =
+      Array.isArray(payrollSettings?.overtimePurposes) &&
+      payrollSettings.overtimePurposes.length > 0
+        ? payrollSettings.overtimePurposes
+        : DEFAULT_OVERTIME_PURPOSES;
+    const active = raw.filter((p) => p.isActive !== false);
+    const existingText = (request.projectPurpose || '').trim();
+    if (
+      existingText &&
+      !active.some((p) => p.name.trim().toLowerCase() === existingText.toLowerCase())
+    ) {
+      return [
+        { id: request.purposeId || 'otp-existing', name: existingText, isActive: true },
+        ...active,
+      ];
+    }
+    return active;
+  }, [payrollSettings?.overtimePurposes, request.projectPurpose, request.purposeId]);
+
+  const matchedPurposeOption = useMemo(
+    () =>
+      activePurposeOptions.find(
+        (p) => p.name.trim().toLowerCase() === selectedPurpose.trim().toLowerCase()
+      ),
+    [activePurposeOptions, selectedPurpose]
+  );
+
+  const hasValidPurpose = Boolean(selectedPurpose.trim());
 
   const handleApprove = () => {
-    if (!canApproveCurrentStep) return;
-    advanceOvertimeWorkflow(request.id, currentStep, remarks.trim() || undefined);
+    if (!canApproveCurrentStep || !hasValidPurpose) return;
+    advanceOvertimeWorkflow(
+      request.id,
+      currentStep,
+      remarks.trim() || undefined,
+      false,
+      {
+        projectPurpose: selectedPurpose.trim(),
+        purposeId: matchedPurposeOption?.id,
+      }
+    );
     if (onSuccess) onSuccess();
     onClose();
   };
 
   const handleJumpToFinalApprove = () => {
-    if (!canSkipToFinal) return;
-    advanceOvertimeWorkflow(request.id, 'FINAL', remarks.trim() || undefined, true);
+    if (!canSkipToFinal || !hasValidPurpose) return;
+    advanceOvertimeWorkflow(
+      request.id,
+      'FINAL',
+      remarks.trim() || undefined,
+      true,
+      {
+        projectPurpose: selectedPurpose.trim(),
+        purposeId: matchedPurposeOption?.id,
+      }
+    );
     if (onSuccess) onSuccess();
     onClose();
   };
@@ -188,36 +242,48 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
           </div>
 
           {/* Details Card */}
-          <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-slate-900 dark:text-white text-sm">
-                {request.employeeName}
-              </span>
-              <span className="font-mono text-[11px] text-slate-500">
-                {request.employeeCode} • {request.department}
-              </span>
+          <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                  Employee Name
+                </span>
+                <span className="font-bold text-slate-900 dark:text-white text-sm">
+                  {request.employeeName}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                  Employee ID
+                </span>
+                <span className="font-mono font-bold text-xs text-slate-700 dark:text-slate-300">
+                  {request.employeeCode} • {request.department}
+                </span>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 text-[11px]">
               <div>
-                <span className="text-slate-400 block text-[10px]">Overtime Date:</span>
+                <span className="text-slate-400 block text-[10px]">Attendance Date:</span>
                 <span className="font-semibold text-slate-800 dark:text-slate-200">{request.overtimeDate}</span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Time Range:</span>
-                <span className="font-mono font-bold text-slate-800 dark:text-slate-200 whitespace-nowrap">
-                  {formatTime12Hour(request.expectedStartTime) || '—'} – {formatTime12Hour(request.expectedEndTime) || '—'}
+                <span className="text-slate-400 block text-[10px]">Overtime Start Time:</span>
+                <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                  {formatTime12Hour(request.expectedStartTime) || '—'}
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Planned Hours:</span>
+                <span className="text-slate-400 block text-[10px]">Overtime End Time:</span>
+                <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                  {formatTime12Hour(request.expectedEndTime) || '—'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[10px]">Total Overtime Duration:</span>
                 <span className="font-mono font-bold text-blue-600 dark:text-blue-400">
-                  {request.expectedHours} Hours
+                  {request.actualOvertimeHours || request.expectedHours} Hours
                 </span>
-              </div>
-              <div>
-                <span className="text-slate-400 block text-[10px]">Production Order:</span>
-                <span className="font-mono text-slate-800 dark:text-slate-200">{request.productionOrderNumber || 'N/A'}</span>
               </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Production Batch:</span>
@@ -232,11 +298,23 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
             </div>
 
             <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 text-[11px] space-y-1">
-              <div>
-                <strong>Purpose:</strong> {request.projectPurpose}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <strong>Selected Purpose:</strong>
+                {selectedPurpose ? (
+                  <span className="font-semibold text-slate-900 dark:text-white">{selectedPurpose}</span>
+                ) : (
+                  <span className="italic text-amber-600 dark:text-amber-400 font-medium">
+                    Blank (Select from Overtime Purpose dropdown below before approving)
+                  </span>
+                )}
+                {request.sourceType === 'QR_ATTENDANCE_AUTO' && (
+                  <span className="ml-auto px-1.5 py-0.5 rounded bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 text-[10px] font-bold">
+                    QR Attendance Auto
+                  </span>
+                )}
               </div>
               <div>
-                <strong>Reason:</strong> {request.overtimeReason}
+                <strong>Reason:</strong> {request.overtimeReason || '—'}
               </div>
             </div>
           </div>
@@ -303,6 +381,37 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
                   </button>
                 )}
               </div>
+
+              {(mode === 'APPROVE' || mode === 'JUMP_FINAL') && (
+                <div className="space-y-1.5">
+                  <label className="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                    <Tag className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Overtime Purpose (From Payroll &amp; HR Settings) *</span>
+                  </label>
+                  <select
+                    value={selectedPurpose}
+                    onChange={(e) => setSelectedPurpose(e.target.value)}
+                    required
+                    className={`w-full py-2 px-3 rounded-xl border bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-semibold ${
+                      hasValidPurpose
+                        ? 'border-slate-200 dark:border-slate-700'
+                        : 'border-amber-400 dark:border-amber-700 ring-1 ring-amber-300/60'
+                    }`}
+                  >
+                    <option value="">-- Select Overtime Purpose --</option>
+                    {activePurposeOptions.map((purpose) => (
+                      <option key={purpose.id} value={purpose.name}>
+                        {purpose.name}
+                      </option>
+                    ))}
+                  </select>
+                  {!hasValidPurpose && (
+                    <p className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                      Please select an Overtime Purpose before approving this request.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {mode === 'APPROVE' && canApproveCurrentStep ? (
                 <div className="space-y-2">
@@ -372,8 +481,9 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
             {mode === 'APPROVE' && canApproveCurrentStep ? (
               <button
                 type="button"
+                disabled={!hasValidPurpose}
                 onClick={handleApprove}
-                className="py-2 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-2 shadow-xs transition-colors cursor-pointer"
+                className="py-2 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold flex items-center gap-2 shadow-xs transition-colors cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Confirm &amp; Sign Off</span>
@@ -381,8 +491,9 @@ export const OvertimeApprovalModal: React.FC<OvertimeApprovalModalProps> = ({
             ) : mode === 'JUMP_FINAL' && canSkipToFinal ? (
               <button
                 type="button"
+                disabled={!hasValidPurpose}
                 onClick={handleJumpToFinalApprove}
-                className="py-2 px-5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold flex items-center gap-2 shadow-xs transition-colors cursor-pointer"
+                className="py-2 px-5 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold flex items-center gap-2 shadow-xs transition-colors cursor-pointer"
               >
                 <FastForward className="w-4 h-4" />
                 <span>Skip Steps &amp; Final Approve</span>

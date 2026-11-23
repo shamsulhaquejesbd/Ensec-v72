@@ -220,6 +220,7 @@ import {
   EMPLOYEE_ATTENDANCES_TABLE_SQL,
   AdvanceLoansDbStatus,
   EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
+  OvertimePurposeOption,
 } from '../types/payroll.ts';
 import {
   DEFAULT_OFFICE_LOCATIONS,
@@ -239,6 +240,7 @@ import {
   tryParseJsonSafe,
 } from '../lib/employeeQr.ts';
 import {
+  DEFAULT_OVERTIME_PURPOSES,
   DEFAULT_PAYROLL_SETTINGS,
 } from '../mock/payrollData.ts';
 import {
@@ -262,6 +264,10 @@ import {
   calculateOvertimeTotalBDT,
   calculateEmployeeIndividualOvertime,
 } from '../types/overtime.ts';
+import {
+  findDuplicateOvertimeRequest,
+  reconcileQrOvertimeRequest,
+} from '../lib/overtimeAutomation.ts';
 import {
   DEFAULT_OVERTIME_POLICY,
   INITIAL_OVERTIME_POLICIES,
@@ -851,6 +857,11 @@ interface ERPContextType {
       employeeCategory?: string;
     };
     record?: AttendanceRecord;
+    overtimeSync?: {
+      action: string;
+      request?: OvertimeRequest;
+      message?: string;
+    } | null;
     dbSynced?: boolean;
   }>;
   getEmployeeAttendanceSummary: (fieldForceId: string, monthYear: string) => any;
@@ -908,7 +919,13 @@ interface ERPContextType {
   createOvertimeRequest: (req: Partial<OvertimeRequest>) => OvertimeRequest;
   updateOvertimeRequest: (id: string, updates: Partial<OvertimeRequest>) => void;
   deleteOvertimeRequest: (id: string) => void;
-  advanceOvertimeWorkflow: (id: string, step: 'SUPERVISOR' | 'PRODUCTION' | 'HR' | 'FINAL', remarks?: string, skipIntermediateSteps?: boolean) => void;
+  advanceOvertimeWorkflow: (
+    id: string,
+    step: 'SUPERVISOR' | 'PRODUCTION' | 'HR' | 'FINAL',
+    remarks?: string,
+    skipIntermediateSteps?: boolean,
+    purposeSelection?: { projectPurpose?: string; purposeId?: string }
+  ) => void;
   rejectOvertimeRequest: (id: string, reason: string) => void;
   recordOvertimeAttendance: (att: Partial<OvertimeAttendance>) => OvertimeAttendance;
   verifyOvertimeAttendance: (id: string, verifiedActualHours?: number, remarks?: string) => void;
@@ -2560,6 +2577,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     maxGpsAccuracyMeters: DEFAULT_PAYROLL_SETTINGS.maxGpsAccuracyMeters ?? DEFAULT_MAX_GPS_ACCURACY_METERS,
     leaveQuotas: { ...(DEFAULT_PAYROLL_SETTINGS.leaveQuotas || { annualLeave: 14, casualLeave: 10, sickLeave: 14, maternityLeave: 112 }) },
     overtimeConfig: { ...(DEFAULT_PAYROLL_SETTINGS.overtimeConfig || { hourlyRateMultiplier: 1.5 }) },
+    overtimePurposes: [...(DEFAULT_PAYROLL_SETTINGS.overtimePurposes || DEFAULT_OVERTIME_PURPOSES)],
     deductionRules: { ...(DEFAULT_PAYROLL_SETTINGS.deductionRules || {}) },
     salaryComponents: { ...(DEFAULT_PAYROLL_SETTINGS.salaryComponents || {}) },
   }));
@@ -4566,6 +4584,26 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.deductionRules?.pfEmployeeContributionPercent ??
       10;
 
+    const normalizeOvertimePurposes = (rawList: any): OvertimePurposeOption[] => {
+      if (!Array.isArray(rawList)) {
+        return [...(prev?.overtimePurposes || DEFAULT_OVERTIME_PURPOSES)];
+      }
+      return rawList
+        .filter((item) => item && typeof item === 'object' && String(item.name || '').trim())
+        .map((item, idx) => ({
+          id: String(item.id || `otp-${idx + 1}-${String(item.name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+          name: String(item.name).trim(),
+          isActive: item.isActive !== false,
+          createdAt: item.createdAt ? String(item.createdAt) : undefined,
+          updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+        }));
+    };
+
+    const nextOvertimePurposes =
+      partial.overtimePurposes !== undefined
+        ? normalizeOvertimePurposes(partial.overtimePurposes)
+        : normalizeOvertimePurposes(prev?.overtimePurposes);
+
     return {
       ...prev,
       ...partial,
@@ -4584,6 +4622,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       overtimeConfig: {
         hourlyRateMultiplier: nextMultiplier,
       },
+      overtimePurposes: nextOvertimePurposes,
       leaveQuotas: {
         annualLeave: partial.leaveQuotas?.annualLeave ?? baseLeave.annualLeave,
         casualLeave: partial.leaveQuotas?.casualLeave ?? baseLeave.casualLeave,
@@ -4614,6 +4653,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       maxGpsAccuracyMeters: jsonMaxGps,
       lateDaysForOneDayAbsent: jsonLateDays,
       overtimeConfig: jsonOvertimeConfig,
+      overtimePurposes: jsonOvertimePurposes,
       companyName: jsonCompanyName,
       companyAddress: jsonCompanyAddress,
       defaultBankAccountId: jsonDefaultBankId,
@@ -4646,6 +4686,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : jsonOvertimeConfig && typeof jsonOvertimeConfig === 'object'
         ? jsonOvertimeConfig
         : {};
+    const remoteOvertimePurposes = Array.isArray(data?.overtime_purposes)
+      ? data.overtime_purposes
+      : Array.isArray(jsonOvertimePurposes)
+      ? jsonOvertimePurposes
+      : undefined;
     const remoteLeaves =
       data?.leave_quotas && typeof data.leave_quotas === 'object' ? data.leave_quotas : {};
     const remoteSalaryComp =
@@ -4662,6 +4707,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       overtimeConfig: {
         hourlyRateMultiplier: Number(remoteOvertime.hourlyRateMultiplier) || 1.5,
       },
+      overtimePurposes: remoteOvertimePurposes,
       leaveQuotas: {
         annualLeave: Number(remoteLeaves.annualLeave ?? 14),
         casualLeave: Number(remoteLeaves.casualLeave ?? 10),
@@ -5325,6 +5371,10 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           productionBatchNumber: r.production_batch_number || undefined,
           productName: r.product_name || undefined,
           projectPurpose: r.project_purpose || '',
+          sourceType: (r.source_type || 'MANUAL') as 'MANUAL' | 'QR_ATTENDANCE_AUTO',
+          purposeId: r.purpose_id || undefined,
+          purposeSelectedBy: r.purpose_selected_by || undefined,
+          purposeSelectedAt: r.purpose_selected_at || undefined,
           expectedStartTime: r.expected_start_time || '18:00',
           expectedEndTime: r.expected_end_time || '22:00',
           expectedHours: Number(r.expected_hours) || 0,
@@ -21753,8 +21803,160 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
+      const upsertAutoOvertimeRequestInState = (otReq: OvertimeRequest) => {
+        setOvertimeRequests((prev) => {
+          const exists = prev.some(
+            (r) =>
+              r.id === otReq.id ||
+              (r.employeeId === otReq.employeeId &&
+                r.overtimeDate === otReq.overtimeDate &&
+                r.status !== 'Cancelled')
+          );
+          if (exists) {
+            return prev.map((r) =>
+              r.id === otReq.id ||
+              (r.employeeId === otReq.employeeId &&
+                r.overtimeDate === otReq.overtimeDate &&
+                r.status !== 'Cancelled')
+                ? otReq
+                : r
+            );
+          }
+          return [otReq, ...prev];
+        });
+      };
+
+      const syncAutoOvertimeClientSide = async (
+        scannedRecord: AttendanceRecord,
+        emp: FieldForceRep
+      ) => {
+        const str = salaryStructures.find(
+          (s) => s.employeeId === emp.id || (emp.code && s.employeeCode === emp.code)
+        );
+        const basic = str ? str.basicSalaryBDT : emp.basicSalaryBDT || 25000;
+        const gross = str ? str.grossSalaryBDT : Math.round(basic * 1.6);
+        const policy = getEmployeeEffectiveOvertimePolicy(emp.id, scannedRecord.date);
+
+        const otResult = reconcileQrOvertimeRequest({
+          existingRequests: overtimeRequests,
+          attendanceRecord: scannedRecord,
+          employee: {
+            id: emp.id,
+            code: emp.code,
+            name: emp.name,
+            department: emp.department,
+            designation: emp.designation,
+            employeeCategory: emp.employeeCategory,
+            basicSalaryBDT: basic,
+          },
+          salaryBasicBDT: basic,
+          salaryGrossBDT: gross,
+          policy,
+          defaultShiftEndTime: payrollSettings?.shiftEndTime || DEFAULT_SHIFT_END_TIME,
+          defaultShiftStartTime: payrollSettings?.shiftStartTime || DEFAULT_SHIFT_START_TIME,
+          nowIso: scannedRecord.updatedAt || new Date().toISOString(),
+        });
+
+        if ((otResult.action === 'CREATED' || otResult.action === 'UPDATED') && otResult.request) {
+          const otReq = otResult.request;
+          upsertAutoOvertimeRequestInState(otReq);
+
+          const sb = getSupabase();
+          if (sb) {
+            if (otResult.action === 'UPDATED') {
+              await sb
+                .from('overtime_requests')
+                .update({
+                  expected_end_time: otReq.expectedEndTime,
+                  expected_hours: otReq.expectedHours,
+                  actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
+                  attendance_id: otReq.attendanceId || null,
+                  basic_salary_bdt: otReq.basicSalaryBDT || 0,
+                  hourly_rate_bdt: otReq.hourlyRateBDT || 0,
+                  overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
+                  calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
+                  overtime_reason: otReq.overtimeReason,
+                  updated_at: otReq.updatedAt || new Date().toISOString(),
+                })
+                .eq('id', otReq.id);
+            } else {
+              const workingPayload: Record<string, any> = {
+                id: otReq.id,
+                request_number: otReq.requestNumber,
+                employee_id: otReq.employeeId,
+                employee_code: otReq.employeeCode,
+                employee_name: otReq.employeeName,
+                department: otReq.department,
+                designation: otReq.designation,
+                employee_category: otReq.employeeCategory || 'Factory Employee',
+                overtime_date: otReq.overtimeDate,
+                purpose_category: otReq.purposeCategory,
+                project_purpose: otReq.projectPurpose ?? '',
+                source_type: otReq.sourceType || 'QR_ATTENDANCE_AUTO',
+                expected_start_time: otReq.expectedStartTime,
+                expected_end_time: otReq.expectedEndTime,
+                expected_hours: otReq.expectedHours,
+                overtime_reason: otReq.overtimeReason,
+                requested_by: otReq.requestedBy,
+                requested_at: otReq.requestedAt,
+                status: otReq.status,
+                attendance_id: otReq.attendanceId || null,
+                actual_overtime_hours: otReq.actualOvertimeHours ?? otReq.expectedHours,
+                basic_salary_bdt: otReq.basicSalaryBDT || 0,
+                hourly_rate_bdt: otReq.hourlyRateBDT || 0,
+                overtime_multiplier: otReq.overtimeMultiplier ?? 2.0,
+                calculated_overtime_amount_bdt: otReq.calculatedOvertimeAmountBDT || 0,
+                is_payroll_processed: false,
+                is_costing_allocated: false,
+                created_at: otReq.createdAt,
+                updated_at: otReq.updatedAt || new Date().toISOString(),
+              };
+              for (let attempt = 0; attempt < 6; attempt++) {
+                const { error } = await sb
+                  .from('overtime_requests')
+                  .upsert(workingPayload, { onConflict: 'id' });
+                if (!error) break;
+                const msg = String(error.message || '');
+                const missingCol =
+                  error.code === 'PGRST204' || msg.includes('schema cache')
+                    ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
+                    : error.code === '42703' || msg.toLowerCase().includes('does not exist')
+                    ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
+                      msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
+                    : null;
+                if (missingCol && Object.prototype.hasOwnProperty.call(workingPayload, missingCol)) {
+                  delete workingPayload[missingCol];
+                  continue;
+                }
+                break;
+              }
+            }
+          }
+
+          addOvertimeAuditLog({
+            recordId: otReq.id,
+            recordType: 'REQUEST',
+            action: otResult.action === 'CREATED' ? 'QR_AUTO_CREATED' : 'QR_AUTO_UPDATED',
+            actorName: currentUser?.name || 'QR Attendance Automation',
+            actorRole: currentUser?.role || 'System',
+            details: otResult.message,
+            newState: otReq.status,
+          });
+        }
+
+        return {
+          action: otResult.action,
+          request: otResult.request,
+          message: otResult.message,
+        };
+      };
+
       qrCooldownStore.set(resolvedRep.id, Date.now());
       applyScannedRecordToState(nextRecord, false);
+      let overtimeSyncResult: any = null;
+      if (action === 'OUT' || action === 'OUT_UPDATE') {
+        overtimeSyncResult = await syncAutoOvertimeClientSide(nextRecord, resolvedRep);
+      }
       addAuditLog(
         action === 'IN' ? 'QR_ATTENDANCE_IN' : 'QR_ATTENDANCE_OUT',
         'Payroll & HR Attendance',
@@ -21781,6 +21983,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           employeeCategory: resolvedRep.employeeCategory,
         },
         record: nextRecord,
+        overtimeSync: overtimeSyncResult,
         dbSynced: true,
       };
     };
@@ -21847,6 +22050,30 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         applyScannedRecordToState(scannedRecord, finalDbSynced);
       }
 
+      if (data?.overtimeSync?.request) {
+        const srvOtReq = data.overtimeSync.request as OvertimeRequest;
+        setOvertimeRequests((prev) => {
+          const exists = prev.some(
+            (r) =>
+              r.id === srvOtReq.id ||
+              (r.employeeId === srvOtReq.employeeId &&
+                r.overtimeDate === srvOtReq.overtimeDate &&
+                r.status !== 'Cancelled')
+          );
+          if (exists) {
+            return prev.map((r) =>
+              r.id === srvOtReq.id ||
+              (r.employeeId === srvOtReq.employeeId &&
+                r.overtimeDate === srvOtReq.overtimeDate &&
+                r.status !== 'Cancelled')
+                ? srvOtReq
+                : r
+            );
+          }
+          return [srvOtReq, ...prev];
+        });
+      }
+
       if (data?.employee?.name) {
         addAuditLog(
           data.action === 'IN' ? 'QR_ATTENDANCE_IN' : 'QR_ATTENDANCE_OUT',
@@ -21868,6 +22095,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         outTime: data.outTime,
         employee: data.employee,
         record: scannedRecord,
+        overtimeSync: data.overtimeSync || null,
         dbSynced: finalDbSynced,
       };
     } catch {
@@ -22984,6 +23212,25 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updatedAt: new Date().toISOString(),
       };
     }
+    const emp = fieldForceReps.find((r) => r.id === req.employeeId || r.code === req.employeeCode);
+    const otDate = req.overtimeDate || new Date().toISOString().substring(0, 10);
+    const resolvedEmpId = req.employeeId || emp?.id || '';
+    const resolvedEmpCode = req.employeeCode || emp?.code || 'EMP-000';
+
+    // Enforce unique employee + attendance date validation across manual & automated requests
+    const duplicateExisting = findDuplicateOvertimeRequest(
+      overtimeRequests,
+      resolvedEmpId,
+      resolvedEmpCode,
+      otDate
+    );
+    if (duplicateExisting) {
+      console.warn(
+        `Duplicate overtime request blocked for employee ${resolvedEmpCode} on ${otDate}. Existing: ${duplicateExisting.requestNumber}`
+      );
+      return duplicateExisting;
+    }
+
     const existingMax = overtimeRequests.reduce((max, r) => {
       const m = String(r.requestNumber || '').match(/(\d+)$/);
       const num = m ? parseInt(m[1], 10) : 0;
@@ -22993,15 +23240,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const reqNum = `OTR-${new Date().getFullYear()}-${String(nextSeq).padStart(3, '0')}`;
     const id = `otr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
-    // Look up employee from Field Force Master
-    const emp = fieldForceReps.find((r) => r.id === req.employeeId || r.code === req.employeeCode);
     const str = salaryStructures.find((s) => s.employeeId === req.employeeId || s.employeeId === emp?.id);
     const basic = str ? str.basicSalaryBDT : (emp?.basicSalaryBDT || 25000);
     const gross = str ? str.grossSalaryBDT : (emp?.basicSalaryBDT ? emp.basicSalaryBDT * 1.6 : 40000);
 
     // Retrieve employee's assigned individual overtime policy for the overtime date
-    const otDate = req.overtimeDate || new Date().toISOString().substring(0, 10);
-    const policy = getEmployeeEffectiveOvertimePolicy(req.employeeId || emp?.id || '', otDate);
+    const policy = getEmployeeEffectiveOvertimePolicy(resolvedEmpId, otDate);
 
     // Calculate according to individual employee's policy
     const expHours = req.expectedHours || calculateNetOvertimeHours(req.expectedStartTime || '18:00', req.expectedEndTime || '22:00', 0);
@@ -23011,12 +23255,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const mult = calc.multiplier;
     const calcAmt = calc.totalAmountBDT;
     const nowIso = new Date().toISOString();
+    const sourceType = req.sourceType || 'MANUAL';
 
     const newRequest: OvertimeRequest = {
       id,
       requestNumber: reqNum,
-      employeeId: req.employeeId || emp?.id || '',
-      employeeCode: req.employeeCode || emp?.code || 'EMP-000',
+      employeeId: resolvedEmpId,
+      employeeCode: resolvedEmpCode,
       employeeName: req.employeeName || emp?.name || 'Staff Member',
       department: req.department || emp?.department || 'Manufacturing & Assembly',
       designation: req.designation || emp?.designation || 'Technician',
@@ -23027,7 +23272,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       productionOrderNumber: req.productionOrderNumber,
       productionBatchNumber: req.productionBatchNumber,
       productName: req.productName,
-      projectPurpose: req.projectPurpose || 'Assembly line overtime quota',
+      projectPurpose:
+        req.projectPurpose !== undefined
+          ? req.projectPurpose
+          : sourceType === 'QR_ATTENDANCE_AUTO'
+          ? ''
+          : 'Assembly line overtime quota',
+      sourceType,
+      purposeId: req.purposeId,
       expectedStartTime: req.expectedStartTime || '18:00',
       expectedEndTime: req.expectedEndTime || '22:00',
       expectedHours: expHours,
@@ -23051,64 +23303,81 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const sb = getSupabase();
     if (sb) {
-      sb.from('overtime_requests')
-        .upsert({
-          id: newRequest.id,
-          request_number: newRequest.requestNumber,
-          employee_id: newRequest.employeeId,
-          employee_code: newRequest.employeeCode,
-          employee_name: newRequest.employeeName,
-          department: newRequest.department,
-          designation: newRequest.designation,
-          employee_category: newRequest.employeeCategory || 'Factory Employee',
-          overtime_date: newRequest.overtimeDate,
-          purpose_category: newRequest.purposeCategory,
-          production_order_id: newRequest.productionOrderId || null,
-          production_order_number: newRequest.productionOrderNumber || null,
-          production_batch_number: newRequest.productionBatchNumber || null,
-          product_name: newRequest.productName || null,
-          project_purpose: newRequest.projectPurpose,
-          expected_start_time: newRequest.expectedStartTime,
-          expected_end_time: newRequest.expectedEndTime,
-          expected_hours: newRequest.expectedHours,
-          overtime_reason: newRequest.overtimeReason,
-          requested_by: newRequest.requestedBy,
-          requested_at: newRequest.requestedAt,
-          status: newRequest.status,
-          basic_salary_bdt: newRequest.basicSalaryBDT || 0,
-          hourly_rate_bdt: newRequest.hourlyRateBDT || 0,
-          overtime_multiplier: newRequest.overtimeMultiplier ?? 2.0,
-          calculated_overtime_amount_bdt: newRequest.calculatedOvertimeAmountBDT || 0,
-          is_payroll_processed: false,
-          is_costing_allocated: false,
-          created_at: newRequest.createdAt,
-          updated_at: newRequest.updatedAt,
-        })
-        .then(async ({ error }) => {
-          if (error) {
-            console.warn('Supabase overtime_requests insert failed:', error.message);
+      const dbInsert: Record<string, any> = {
+        id: newRequest.id,
+        request_number: newRequest.requestNumber,
+        employee_id: newRequest.employeeId,
+        employee_code: newRequest.employeeCode,
+        employee_name: newRequest.employeeName,
+        department: newRequest.department,
+        designation: newRequest.designation,
+        employee_category: newRequest.employeeCategory || 'Factory Employee',
+        overtime_date: newRequest.overtimeDate,
+        purpose_category: newRequest.purposeCategory,
+        production_order_id: newRequest.productionOrderId || null,
+        production_order_number: newRequest.productionOrderNumber || null,
+        production_batch_number: newRequest.productionBatchNumber || null,
+        product_name: newRequest.productName || null,
+        project_purpose: newRequest.projectPurpose,
+        source_type: newRequest.sourceType || 'MANUAL',
+        purpose_id: newRequest.purposeId || null,
+        expected_start_time: newRequest.expectedStartTime,
+        expected_end_time: newRequest.expectedEndTime,
+        expected_hours: newRequest.expectedHours,
+        overtime_reason: newRequest.overtimeReason,
+        requested_by: newRequest.requestedBy,
+        requested_at: newRequest.requestedAt,
+        status: newRequest.status,
+        basic_salary_bdt: newRequest.basicSalaryBDT || 0,
+        hourly_rate_bdt: newRequest.hourlyRateBDT || 0,
+        overtime_multiplier: newRequest.overtimeMultiplier ?? 2.0,
+        calculated_overtime_amount_bdt: newRequest.calculatedOvertimeAmountBDT || 0,
+        is_payroll_processed: false,
+        is_costing_allocated: false,
+        created_at: newRequest.createdAt,
+        updated_at: newRequest.updatedAt,
+      };
+      (async () => {
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const { error } = await sb.from('overtime_requests').upsert(dbInsert);
+          if (!error) {
+            if (newRequest.batchAllocations.length > 0) {
+              await sb.from('overtime_batch_allocations').insert(
+                newRequest.batchAllocations.map((a) => ({
+                  id: a.id,
+                  request_id: newRequest.id,
+                  production_order_id: a.productionOrderId || null,
+                  production_order_number: a.productionOrderNumber,
+                  production_batch_number: a.productionBatchNumber,
+                  product_id: a.productId || null,
+                  product_name: a.productName,
+                  process_type: a.processType,
+                  allocated_hours: Number(a.allocatedHours) || 0,
+                  hourly_rate_bdt: Number(a.hourlyRateBDT) || 0,
+                  allocated_cost_bdt: Number(a.allocatedCostBDT) || 0,
+                  is_overhead: Boolean(a.isOverhead),
+                  notes: a.notes || null,
+                }))
+              );
+            }
             return;
           }
-          if (newRequest.batchAllocations.length > 0) {
-            await sb.from('overtime_batch_allocations').insert(
-              newRequest.batchAllocations.map((a) => ({
-                id: a.id,
-                request_id: newRequest.id,
-                production_order_id: a.productionOrderId || null,
-                production_order_number: a.productionOrderNumber,
-                production_batch_number: a.productionBatchNumber,
-                product_id: a.productId || null,
-                product_name: a.productName,
-                process_type: a.processType,
-                allocated_hours: Number(a.allocatedHours) || 0,
-                hourly_rate_bdt: Number(a.hourlyRateBDT) || 0,
-                allocated_cost_bdt: Number(a.allocatedCostBDT) || 0,
-                is_overhead: Boolean(a.isOverhead),
-                notes: a.notes || null,
-              }))
-            );
+          const msg = String(error.message || '');
+          const missingCol =
+            error.code === 'PGRST204' || msg.includes('schema cache')
+              ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
+              : error.code === '42703' || msg.toLowerCase().includes('does not exist')
+              ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
+                msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
+              : null;
+          if (missingCol && Object.prototype.hasOwnProperty.call(dbInsert, missingCol)) {
+            delete dbInsert[missingCol];
+            continue;
           }
-        });
+          console.warn('Supabase overtime_requests insert failed:', error.message);
+          return;
+        }
+      })();
     }
 
     addOvertimeAuditLog({
@@ -23246,7 +23515,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     id: string,
     step: 'SUPERVISOR' | 'PRODUCTION' | 'HR' | 'FINAL',
     remarks?: string,
-    skipIntermediateSteps?: boolean
+    skipIntermediateSteps?: boolean,
+    purposeSelection?: { projectPurpose?: string; purposeId?: string }
   ) => {
     const requiredAction =
       step === 'SUPERVISOR'
@@ -23271,6 +23541,20 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let actionDesc = '';
     const dbPatch: any = { updated_at: now };
     let updatedReq: OvertimeRequest = { ...target, updatedAt: now };
+
+    const selectedPurposeText = String(purposeSelection?.projectPurpose || '').trim();
+    if (selectedPurposeText) {
+      updatedReq.projectPurpose = selectedPurposeText;
+      updatedReq.purposeId = purposeSelection?.purposeId || updatedReq.purposeId;
+      updatedReq.purposeSelectedBy = currentUser.name;
+      updatedReq.purposeSelectedAt = now;
+      dbPatch.project_purpose = selectedPurposeText;
+      if (purposeSelection?.purposeId) {
+        dbPatch.purpose_id = purposeSelection.purposeId;
+      }
+      dbPatch.purpose_selected_by = currentUser.name;
+      dbPatch.purpose_selected_at = now;
+    }
 
     if (step === 'SUPERVISOR') {
       nextStatus = 'Supervisor Approved';
@@ -23349,9 +23633,27 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const sb = getSupabase();
     if (sb) {
-      sb.from('overtime_requests').update(dbPatch).eq('id', id).then(({ error }) => {
-        if (error) console.warn('Supabase advanceOvertimeWorkflow failed:', error.message);
-      });
+      (async () => {
+        const workingPatch = { ...dbPatch };
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const { error } = await sb.from('overtime_requests').update(workingPatch).eq('id', id);
+          if (!error) return;
+          const msg = String(error.message || '');
+          const missingCol =
+            error.code === 'PGRST204' || msg.includes('schema cache')
+              ? msg.match(/Could not find the '([^']+)' column/i)?.[1]
+              : error.code === '42703' || msg.toLowerCase().includes('does not exist')
+              ? msg.match(/column\s+"([^"]+)"/i)?.[1] ||
+                msg.match(/column\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)/i)?.[1]
+              : null;
+          if (missingCol && Object.prototype.hasOwnProperty.call(workingPatch, missingCol)) {
+            delete workingPatch[missingCol];
+            continue;
+          }
+          console.warn('Supabase advanceOvertimeWorkflow failed:', error.message);
+          return;
+        }
+      })();
     }
 
     addOvertimeAuditLog({
@@ -23360,7 +23662,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       action: actionDesc,
       actorName: currentUser.name,
       actorRole: currentUser.role,
-      details: `${actionDesc} on ${target.requestNumber}. Remarks: ${remarks || 'None'}`,
+      details: `${actionDesc} on ${target.requestNumber}.${selectedPurposeText ? ` Purpose: ${selectedPurposeText}.` : ''} Remarks: ${remarks || 'None'}`,
       previousState: prevStatus,
       newState: nextStatus,
     });
@@ -24382,6 +24684,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       standard_working_days_per_month: Math.max(1, Number(settings.standardWorkingDaysPerMonth) || 26),
       standard_daily_hours: Math.max(1, Number(settings.standardDailyHours) || 8),
       overtime_config: settings.overtimeConfig || { hourlyRateMultiplier: 1.5 },
+      overtime_purposes: settings.overtimePurposes || DEFAULT_OVERTIME_PURPOSES,
       leave_quotas: settings.leaveQuotas || {
         annualLeave: 14,
         casualLeave: 10,
@@ -24392,6 +24695,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(settings.deductionRules || {}),
         pfEmployeeContributionPercent: pfPercent,
         overtimeConfig: settings.overtimeConfig || { hourlyRateMultiplier: 1.5 },
+        overtimePurposes: settings.overtimePurposes || DEFAULT_OVERTIME_PURPOSES,
         shiftStartTime: settings.shiftStartTime || DEFAULT_SHIFT_START_TIME,
         shiftEndTime: settings.shiftEndTime || DEFAULT_SHIFT_END_TIME,
         lateGracePeriodMinutes: Math.max(0, Number(settings.lateGracePeriodMinutes ?? DEFAULT_GRACE_PERIOD_MINUTES)),
@@ -24536,9 +24840,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     sqlFix?: string;
     dbStatus?: PayrollSettingsDbStatus;
   }> => {
+    const canUpdatePurposesOnly =
+      Object.keys(newSettings).every((k) => k === 'overtimePurposes') &&
+      hasPageAction(currentUser, 'overtime-management', 'configure_policy');
+
     if (
       !hasPageAction(currentUser, 'payroll', 'create_payroll') &&
-      !hasPageAction(currentUser, 'payroll', 'approve_payroll')
+      !hasPageAction(currentUser, 'payroll', 'approve_payroll') &&
+      !canUpdatePurposesOnly
     ) {
       console.warn('Permission denied: create_payroll or approve_payroll required to update payroll settings.');
       addAuditLog('PERMISSION_DENIED', 'HR & Payroll', `${currentUser?.name || 'User'} attempted to modify payroll settings without permission`);

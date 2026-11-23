@@ -13,6 +13,7 @@ import {
   OvertimeRecord,
   BonusRecord,
   MonthlyPayrollRun,
+  OvertimePurposeOption,
   PayrollSettings,
 } from '../types/payroll';
 import { FieldForceRep } from '../types/erp';
@@ -29,6 +30,19 @@ export const INITIAL_OVERTIME_RECORDS: OvertimeRecord[] = [];
 
 export const INITIAL_BONUS_RECORDS: BonusRecord[] = [];
 
+export const DEFAULT_OVERTIME_PURPOSES: OvertimePurposeOption[] = [
+  { id: 'otp-super-vasmol-kesh-kala', name: 'Super Vasmol Kesh Kala', isActive: true },
+  { id: 'otp-vasmol-kali-mehendi', name: 'Vasmol Kali Mehendi', isActive: true },
+  { id: 'otp-hair-oil-serum', name: 'Hair Oil & Serum', isActive: true },
+  { id: 'otp-developer', name: 'Developer', isActive: true },
+  { id: 'otp-shampoo-cream-hair-color', name: 'Shampoo & Cream Hair Color', isActive: true },
+  { id: 'otp-security-reason-production', name: 'Security Reason Production Work', isActive: true },
+  { id: 'otp-urgent-dispatch', name: 'Urgent Dispatch', isActive: true },
+  { id: 'otp-factory-maintenance', name: 'Factory Maintenance', isActive: true },
+  { id: 'otp-additional-assembly', name: 'Additional Assembly', isActive: true },
+  { id: 'otp-emergency-work', name: 'Emergency Work', isActive: true },
+];
+
 export const DEFAULT_PAYROLL_SETTINGS: PayrollSettings = {
   workingDaysPerMonth: 26,
   standardWorkingDaysPerMonth: 26,
@@ -38,6 +52,7 @@ export const DEFAULT_PAYROLL_SETTINGS: PayrollSettings = {
   overtimeConfig: {
     hourlyRateMultiplier: 1.5,
   },
+  overtimePurposes: DEFAULT_OVERTIME_PURPOSES,
   lateGracePeriodMinutes: 15,
   lateDaysForOneDayAbsent: 3,
   annualLeaveQuota: 14,

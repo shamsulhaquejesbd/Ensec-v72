@@ -91,7 +91,7 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
         const matchesEmp = req.employeeName.toLowerCase().includes(q) || req.employeeCode.toLowerCase().includes(q);
         const matchesReq = req.requestNumber.toLowerCase().includes(q);
         const matchesBatch = (req.productionBatchNumber || '').toLowerCase().includes(q);
-        const matchesPurpose = req.projectPurpose.toLowerCase().includes(q);
+        const matchesPurpose = (req.projectPurpose || '').toLowerCase().includes(q);
         if (!matchesEmp && !matchesReq && !matchesBatch && !matchesPurpose) return false;
       }
 
@@ -331,6 +331,11 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
 
                     <td className="p-3 max-w-[240px]">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        {req.sourceType === 'QR_ATTENDANCE_AUTO' && (
+                          <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800">
+                            QR Auto
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded font-mono font-bold text-[10px] bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
                           {req.productionBatchNumber || 'General Overhead'}
                         </span>
@@ -342,9 +347,15 @@ export const OvertimeRequestsTab: React.FC<OvertimeRequestsTabProps> = ({
                           {req.purposeCategory}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-1 line-clamp-1 font-medium" title={req.projectPurpose}>
-                        {req.projectPurpose}
-                      </p>
+                      {req.projectPurpose && req.projectPurpose.trim() ? (
+                        <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-1 line-clamp-1 font-medium" title={req.projectPurpose}>
+                          {req.projectPurpose}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1 italic font-medium">
+                          Purpose pending (Select on approval)
+                        </p>
+                      )}
                     </td>
 
                     <td className="p-3 text-center">

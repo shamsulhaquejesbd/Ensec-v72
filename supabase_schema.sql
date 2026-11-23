@@ -3289,6 +3289,7 @@ ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_start_time TE
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS shift_end_time TEXT DEFAULT '18:00';
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS late_grace_period_minutes INT DEFAULT 15;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS max_gps_accuracy_meters INT DEFAULT 100;
+ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS overtime_purposes JSONB;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_by TEXT;
 ALTER TABLE public.payroll_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
@@ -3401,6 +3402,10 @@ CREATE TABLE IF NOT EXISTS public.overtime_requests (
   production_batch_number TEXT,
   product_name TEXT,
   project_purpose TEXT NOT NULL,
+  source_type TEXT NOT NULL DEFAULT 'MANUAL',
+  purpose_id TEXT,
+  purpose_selected_by TEXT,
+  purpose_selected_at TIMESTAMPTZ,
   expected_start_time TEXT NOT NULL,
   expected_end_time TEXT NOT NULL,
   expected_hours NUMERIC(5, 2) NOT NULL,
@@ -3441,6 +3446,14 @@ CREATE TABLE IF NOT EXISTS public.overtime_requests (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'MANUAL';
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_id TEXT;
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_selected_by TEXT;
+ALTER TABLE public.overtime_requests ADD COLUMN IF NOT EXISTS purpose_selected_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_overtime_requests_employee_date
+  ON public.overtime_requests (employee_id, overtime_date)
+  WHERE status <> 'Cancelled';
 
 CREATE TABLE IF NOT EXISTS public.overtime_attendances (
   id TEXT PRIMARY KEY,

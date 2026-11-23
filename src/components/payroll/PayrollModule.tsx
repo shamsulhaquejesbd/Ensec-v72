@@ -90,12 +90,14 @@ import {
   MonthlySalarySheetItem,
   MonthlyPayrollRun,
   SalaryPaymentRecord,
+  OvertimePurposeOption,
   PayrollSettings,
   SALARY_STRUCTURES_TABLE_SQL,
   PAYROLL_SETTINGS_TABLE_SQL,
   EMPLOYEE_ATTENDANCES_TABLE_SQL,
   EMPLOYEE_ADVANCES_LOANS_TABLE_SQL,
 } from '../../types/payroll.ts';
+import { DEFAULT_OVERTIME_PURPOSES } from '../../mock/payrollData.ts';
 import { FieldForceRep } from '../../types/erp.ts';
 import {
   findLinkedUserForEmployee,
@@ -192,6 +194,8 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
   const canEditSalaryStructure = hasPageAction('payroll', 'edit_salary_structure');
   const canExportPayroll = hasPageAction('payroll', 'export');
   const canConfigurePayrollRules = canCreatePayroll || canApprovePayroll;
+  const canManageOvertimePurposes =
+    canConfigurePayrollRules || hasPageAction('overtime-management', 'configure_policy');
   const canAccessOvertimeHub = hasPageAccess('overtime-management');
   const canManageAllLeaves =
     currentUser?.role === 'Super Admin' ||
@@ -299,6 +303,14 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
     type: 'success' | 'warning' | 'error';
     message: string;
     sqlFix?: string;
+  } | null>(null);
+  const [newPurposeName, setNewPurposeName] = useState<string>('');
+  const [editingPurposeId, setEditingPurposeId] = useState<string | null>(null);
+  const [editingPurposeName, setEditingPurposeName] = useState<string>('');
+  const [isSavingPurposes, setIsSavingPurposes] = useState<boolean>(false);
+  const [purposeFeedback, setPurposeFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
   } | null>(null);
   const [settingsForm, setSettingsForm] = useState({
     standardWorkingDaysPerMonth: String(payrollSettings?.standardWorkingDaysPerMonth ?? 26),
@@ -4912,6 +4924,316 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
               )}
             </div>
           </div>
+
+          {/* Overtime Purpose Settings */}
+          {(() => {
+            const configuredPurposes: OvertimePurposeOption[] =
+              Array.isArray(payrollSettings?.overtimePurposes) &&
+              payrollSettings.overtimePurposes.length > 0
+                ? payrollSettings.overtimePurposes
+                : DEFAULT_OVERTIME_PURPOSES;
+
+            const persistPurposeList = async (
+              nextPurposes: OvertimePurposeOption[],
+              successMessage: string
+            ) => {
+              setIsSavingPurposes(true);
+              setPurposeFeedback(null);
+              const result = await updatePayrollSettings({
+                overtimePurposes: nextPurposes,
+              });
+              setIsSavingPurposes(false);
+
+              if (!result.success) {
+                setPurposeFeedback({
+                  type: 'error',
+                  message: result.error || 'Failed to update overtime purposes.',
+                });
+                return false;
+              }
+
+              setPurposeFeedback({
+                type: result.dbSynced ? 'success' : 'warning',
+                message: result.dbSynced
+                  ? successMessage
+                  : `${successMessage} (Saved locally; run Supabase SQL migration to persist directly in payroll_settings.overtime_purposes.)`,
+              });
+              return true;
+            };
+
+            const handleAddOvertimePurpose = async (e: React.FormEvent) => {
+              e.preventDefault();
+              if (!canManageOvertimePurposes || isSavingPurposes) return;
+              const trimmed = newPurposeName.trim();
+              if (!trimmed) {
+                setPurposeFeedback({
+                  type: 'error',
+                  message: 'Please enter an overtime purpose name.',
+                });
+                return;
+              }
+              const duplicate = configuredPurposes.some(
+                (p) => p.name.trim().toLowerCase() === trimmed.toLowerCase()
+              );
+              if (duplicate) {
+                setPurposeFeedback({
+                  type: 'error',
+                  message: `"${trimmed}" already exists in Overtime Purpose Settings.`,
+                });
+                return;
+              }
+              const nowIso = new Date().toISOString();
+              const slug = trimmed
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/(^-|-$)/g, '')
+                .slice(0, 32);
+              const nextPurposes: OvertimePurposeOption[] = [
+                ...configuredPurposes,
+                {
+                  id: `otp-${slug || 'custom'}-${Date.now()}`,
+                  name: trimmed,
+                  isActive: true,
+                  createdAt: nowIso,
+                  updatedAt: nowIso,
+                },
+              ];
+              const ok = await persistPurposeList(
+                nextPurposes,
+                `Added overtime purpose "${trimmed}" to Settings.`
+              );
+              if (ok) {
+                setNewPurposeName('');
+              }
+            };
+
+            const handleSaveEditedPurpose = async (purposeId: string) => {
+              if (!canManageOvertimePurposes || isSavingPurposes) return;
+              const trimmed = editingPurposeName.trim();
+              if (!trimmed) {
+                setPurposeFeedback({
+                  type: 'error',
+                  message: 'Overtime purpose name cannot be empty.',
+                });
+                return;
+              }
+              const duplicate = configuredPurposes.some(
+                (p) =>
+                  p.id !== purposeId &&
+                  p.name.trim().toLowerCase() === trimmed.toLowerCase()
+              );
+              if (duplicate) {
+                setPurposeFeedback({
+                  type: 'error',
+                  message: `Another purpose named "${trimmed}" already exists.`,
+                });
+                return;
+              }
+              const nowIso = new Date().toISOString();
+              const nextPurposes = configuredPurposes.map((p) =>
+                p.id === purposeId ? { ...p, name: trimmed, updatedAt: nowIso } : p
+              );
+              const ok = await persistPurposeList(
+                nextPurposes,
+                `Updated overtime purpose to "${trimmed}".`
+              );
+              if (ok) {
+                setEditingPurposeId(null);
+                setEditingPurposeName('');
+              }
+            };
+
+            const handleTogglePurposeActive = async (purpose: OvertimePurposeOption) => {
+              if (!canManageOvertimePurposes || isSavingPurposes) return;
+              const nextActive = purpose.isActive === false;
+              const nowIso = new Date().toISOString();
+              const nextPurposes = configuredPurposes.map((p) =>
+                p.id === purpose.id ? { ...p, isActive: nextActive, updatedAt: nowIso } : p
+              );
+              await persistPurposeList(
+                nextPurposes,
+                `${nextActive ? 'Activated' : 'Deactivated'} overtime purpose "${purpose.name}".`
+              );
+            };
+
+            return (
+              <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Tag className="w-4 h-4 text-indigo-600" />
+                      <span>Overtime Purpose Settings</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Manage active Overtime Purposes loaded dynamically into the Overtime Approval dropdown for QR-automated overtime requests.
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 w-fit">
+                    {configuredPurposes.filter((p) => p.isActive !== false).length} Active / {configuredPurposes.length} Total
+                  </span>
+                </div>
+
+                {purposeFeedback && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+                      purposeFeedback.type === 'success'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                        : purposeFeedback.type === 'warning'
+                        ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+                        : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+                    }`}
+                  >
+                    <span className="font-medium">{purposeFeedback.message}</span>
+                    <button
+                      type="button"
+                      onClick={() => setPurposeFeedback(null)}
+                      className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {canManageOvertimePurposes ? (
+                  <form onSubmit={handleAddOvertimePurpose} className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={newPurposeName}
+                      onChange={(e) => setNewPurposeName(e.target.value)}
+                      placeholder="Add new overtime purpose (e.g., Super Vasmol Kesh Kala, Urgent Dispatch)..."
+                      disabled={isSavingPurposes}
+                      className="flex-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium text-slate-900 dark:text-white disabled:opacity-60"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isSavingPurposes || !newPurposeName.trim()}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>{isSavingPurposes ? 'Saving...' : 'Add Purpose'}</span>
+                    </button>
+                  </form>
+                ) : (
+                  <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Read-only: Payroll rule or Overtime policy permission is required to add or edit overtime purposes.</span>
+                  </div>
+                )}
+
+                <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
+                  {configuredPurposes.map((purpose, idx) => {
+                    const isEditing = editingPurposeId === purpose.id;
+                    const isActive = purpose.isActive !== false;
+                    return (
+                      <div
+                        key={purpose.id}
+                        className="px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 bg-white dark:bg-slate-900 hover:bg-slate-50/70 dark:hover:bg-slate-800/40 text-xs"
+                      >
+                        <div className="flex items-center gap-2.5 flex-1 min-w-[200px]">
+                          <span className="font-mono text-[10px] text-slate-400 w-5">
+                            {String(idx + 1).padStart(2, '0')}
+                          </span>
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={editingPurposeName}
+                              onChange={(e) => setEditingPurposeName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  void handleSaveEditedPurpose(purpose.id);
+                                } else if (e.key === 'Escape') {
+                                  setEditingPurposeId(null);
+                                  setEditingPurposeName('');
+                                }
+                              }}
+                              autoFocus
+                              className="flex-1 px-2.5 py-1 rounded-lg border border-indigo-400 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-white"
+                            />
+                          ) : (
+                            <span
+                              className={`font-semibold ${
+                                isActive
+                                  ? 'text-slate-900 dark:text-white'
+                                  : 'text-slate-400 line-through'
+                              }`}
+                            >
+                              {purpose.name}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              isActive
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                                : 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
+                            }`}
+                          >
+                            {isActive ? 'Active' : 'Inactive'}
+                          </span>
+
+                          {canManageOvertimePurposes && (
+                            <>
+                              {isEditing ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingPurposes}
+                                    onClick={() => void handleSaveEditedPurpose(purpose.id)}
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>Save</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingPurposes}
+                                    onClick={() => {
+                                      setEditingPurposeId(null);
+                                      setEditingPurposeName('');
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-semibold"
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingPurposes}
+                                    onClick={() => {
+                                      setEditingPurposeId(purpose.id);
+                                      setEditingPurposeName(purpose.name);
+                                      setPurposeFeedback(null);
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-[11px] font-semibold flex items-center gap-1"
+                                  >
+                                    <Edit2 className="w-3 h-3" />
+                                    <span>Edit</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingPurposes}
+                                    onClick={() => void handleTogglePurposeActive(purpose)}
+                                    className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-[11px] font-semibold"
+                                  >
+                                    {isActive ? 'Disable' : 'Activate'}
+                                  </button>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -6443,11 +6765,12 @@ export const PayrollModule: React.FC<PayrollModuleProps> = ({
             }
           }
           if (result.employeeName) {
+            const otNote = result.overtimeSync?.message ? ` • ${result.overtimeSync.message}` : '';
             setAttendanceFeedback({
               type: 'success',
               message: `QR Attendance: ${result.employeeName} (${result.employeeCode}) — ${
                 result.action === 'IN' ? 'IN' : 'OUT'
-              } recorded at ${result.time12}.`,
+              } recorded at ${result.time12}.${otNote}`,
             });
           }
         }}

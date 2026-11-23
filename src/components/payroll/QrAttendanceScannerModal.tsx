@@ -40,6 +40,10 @@ interface QrAttendanceScannerModalProps {
     employeeCode?: string;
     action?: 'IN' | 'OUT' | 'OUT_UPDATE';
     time12?: string;
+    overtimeSync?: {
+      action: string;
+      message?: string;
+    } | null;
   }) => void;
 }
 
@@ -178,6 +182,12 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
         const res = await submitQrAttendanceScan(payload);
         if (res.success && res.employee) {
           localCooldownRef.current.set(payload, Date.now());
+          const otCreatedOrUpdated =
+            res.overtimeSync?.action === 'CREATED' || res.overtimeSync?.action === 'UPDATED';
+          const combinedStatusMessage =
+            otCreatedOrUpdated && res.overtimeSync?.message
+              ? `${res.statusMessage || 'Recorded Successfully'} • ${res.overtimeSync.message}`
+              : res.statusMessage || 'Recorded Successfully';
           const item: QrScanFeedbackItem = {
             id: `qrlog-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
             employeeName: res.employee.name,
@@ -185,7 +195,7 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
             department: res.employee.department,
             action: res.action || 'IN',
             statusLabel: res.statusLabel || (res.action === 'IN' ? 'IN' : 'OUT'),
-            statusMessage: res.statusMessage || 'Recorded Successfully',
+            statusMessage: combinedStatusMessage,
             time12: res.recordedTime12 || res.recordedTime24 || '',
             date: res.date || '',
             scannedAtMs: Date.now(),
@@ -208,6 +218,7 @@ export const QrAttendanceScannerModal: React.FC<QrAttendanceScannerModalProps> =
             employeeCode: item.employeeCode,
             action: item.action,
             time12: item.time12,
+            overtimeSync: res.overtimeSync || null,
           });
         } else if (res.duplicateBlocked) {
           showTransientBanner({
